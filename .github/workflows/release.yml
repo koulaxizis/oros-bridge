@@ -1,0 +1,50 @@
+# A release of orOS Bridge for Windows, started by hand (Actions → release →
+# Run workflow). It builds and tests like build.yml and leaves a DRAFT
+# release with the exe, a zip (exe + README, LICENSE, THIRD_PARTY) and their
+# SHA-256 sums; the owner tries it and publishes it. Asset names do not
+# change between versions, so
+# https://github.com/koulaxizis/oros-bridge/releases/latest/download/oros-bridge-windows-x64.exe
+# always gives the newest published one (orOS links it).
+name: release
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Package
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path CMakeLists.txt -Pattern 'project\(oros_bridge VERSION ([0-9.]+)').Matches[0].Groups[1].Value
+          "TAG=v$v" | Out-File -Append $env:GITHUB_ENV
+          New-Item -ItemType Directory out, zip | Out-Null
+          Copy-Item build/Release/oros-bridge.exe out/oros-bridge-windows-x64.exe
+          Copy-Item build/Release/oros-bridge.exe, README.md, LICENSE, THIRD_PARTY.md zip/
+          Compress-Archive -Path zip/* -DestinationPath out/oros-bridge-windows-x64.zip
+          Get-ChildItem out | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" } | Out-File -Encoding ascii out/SHA256SUMS.txt
+          Get-Content out/SHA256SUMS.txt
+      - name: Draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/* --clobber
+          else
+            gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "orOS Bridge ${TAG#v}" \
+              --notes "Windows x64. Download oros-bridge-windows-x64.exe, run it and keep its window open while you use orOS Studio (Studio → a track's settings → Plugin on this computer). The exe is not signed yet: Windows SmartScreen may ask once (More info → Run anyway). SHA-256 sums in SHA256SUMS.txt. Free, MIT." \
+              out/*
+          fi
