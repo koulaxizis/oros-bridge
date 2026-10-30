@@ -34,7 +34,8 @@ jobs:
           Copy-Item build/Release/oros-bridge.exe out/oros-bridge-windows-x64.exe
           Copy-Item build/Release/oros-bridge.exe, README.md, LICENSE, THIRD_PARTY.md zip/
           Compress-Archive -Path zip/* -DestinationPath out/oros-bridge-windows-x64.zip
-          Get-ChildItem out | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" } | Out-File -Encoding ascii out/SHA256SUMS.txt
+          $sums = Get-ChildItem out -File | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" }
+          $sums | Out-File -Encoding ascii out/SHA256SUMS.txt
           Get-Content out/SHA256SUMS.txt
       - name: Draft release
         shell: bash
