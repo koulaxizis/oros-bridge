@@ -11,9 +11,12 @@ back, as fast as the plugin goes, so nothing crackles on a busy computer.
 
 ## Use it
 
-1. Download `oros-bridge-windows-x64` from the latest build and run
-   `oros-bridge.exe`. Keep its window open while you use Studio.
-2. In Studio, connect the bridge. The bridge window shows a 6-digit code;
+1. Download [`oros-bridge-windows-x64.exe`](https://github.com/koulaxizis/oros-bridge/releases/latest/download/oros-bridge-windows-x64.exe)
+   from the [latest release](https://github.com/koulaxizis/oros-bridge/releases/latest)
+   and run it; it needs no setup. Keep its window open while you use Studio.
+   It is not signed yet, so Windows SmartScreen may ask once
+   (More info → Run anyway).
+2. In Studio, open a track's settings and press `Plugin on this computer`. The bridge window shows a 6-digit code;
    type it in Studio once. Studio keeps a key, so next time it just connects.
 3. Studio lists your plugins (from `C:\Program Files\Common Files\VST3`,
    `...\CLAP` and the same folders under your user). Pick one for a track,
