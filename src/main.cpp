@@ -6,28 +6,48 @@
 #include <iostream>
 #include <thread>
 #include "config.h"
+#include "gui.h"
 #include "mainloop.h"
 #include "scan.h"
 #include "server.h"
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 using namespace ob;
 
 static const char* kUsage =
     "orOS Bridge " OROS_BRIDGE_VERSION "\n"
     "Lets orOS Studio use the VST3 and CLAP plugins on this computer.\n\n"
-    "  oros-bridge                 run (keep this window open while you use Studio)\n"
+    "  oros-bridge                 run; on Windows in its own window and the tray\n"
+    "  --tray                      start hidden in the tray (Windows)\n"
+    "  --console                   run in the console instead of a window\n"
     "  --port N                    listen on 127.0.0.1:N (default 47621)\n"
     "  --allow-origin URL          also accept pages from URL (repeatable)\n"
     "  --config-dir DIR            keep settings in DIR\n"
     "  --scan                      look for plugins, print them, exit\n"
     "  --forget-pairings           forget every paired browser, exit\n";
 
+#ifdef _WIN32
+// The program is built as a window program, so it has no console of its own.
+// Command-line use writes to the console it was started from; output that
+// is already redirected (a pipe, a file) is left as it is.
+static void useConsole() {
+  HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+  if (h && h != INVALID_HANDLE_VALUE) return;
+  if (AttachConsole(ATTACH_PARENT_PROCESS) || AllocConsole()) {
+    std::freopen("CONOUT$", "w", stdout);
+    std::freopen("CONOUT$", "w", stderr);
+  }
+}
+#endif
 
 int main(int argc, char** argv) {
   ServerOptions opt;
   opt.origins = {"https://useoros.online", "https://www.useoros.online"};
   std::string dir = Config::defaultDir();
-  bool scanOnly = false, forget = false;
+  bool scanOnly = false, forget = false, console = false, tray = false, help = false;
+  std::string unknown;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
     auto next = [&]() -> std::string {
@@ -43,9 +63,21 @@ int main(int argc, char** argv) {
     else if (a == "--config-dir") dir = next();
     else if (a == "--scan") scanOnly = true;
     else if (a == "--forget-pairings") forget = true;
-    else if (a == "--help" || a == "-h") { std::cout << kUsage; return 0; }
-    else { std::cerr << "unknown option " << a << "\n" << kUsage; return 2; }
+    else if (a == "--console") console = true;
+    else if (a == "--tray") tray = true;
+    else if (a == "--help" || a == "-h") { console = true; help = true; }
+    else { unknown = a; break; }
   }
+#ifdef _WIN32
+  bool gui = !console && !scanOnly && !forget && unknown.empty();
+  if (!gui) useConsole();
+#else
+  const bool gui = false;
+  (void)tray;
+#endif
+  if (help) { std::cout << kUsage; return 0; }
+  if (!unknown.empty()) { std::cerr << "unknown option " << unknown << "\n" << kUsage; return 2; }
+  if (gui && guiAlreadyRunning()) return 0;
 
   Config cfg(dir);
   cfg.load();
@@ -60,22 +92,25 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  Pairing pairing(cfg, [](const std::string& code) {
+  Pairing pairing(cfg, [gui](const std::string& code) {
+    if (gui) guiPairingCode(code);
     std::cout << "\nPairing code: " << code << "\nType it in orOS Studio to let it use your plugins.\n" << std::flush;
   });
   Server server(opt, cfg, pairing);
   std::string err;
   if (!server.listen(err)) {
+    if (gui) guiError(err);
     std::cerr << "orOS Bridge could not start: " << err << "\n";
     return 1;
   }
   std::cout << "orOS Bridge " OROS_BRIDGE_VERSION " is ready on 127.0.0.1:" << server.port() << "\n"
             << "Settings: " << cfg.dir() << "\n"
             << "Keep this window open while you use orOS Studio.\n" << std::flush;
+  std::thread net([&] { server.run(); });
+  if (gui) return guiRun(cfg, server, pairing, tray);
   // Ctrl+C or closing the window ends the bridge; the system frees the plugins
   std::signal(SIGINT, [](int) { std::_Exit(0); });
   std::signal(SIGTERM, [](int) { std::_Exit(0); });
-  std::thread net([&] { server.run(); });
   MainLoop::get().run();
   server.stop();
   net.join();

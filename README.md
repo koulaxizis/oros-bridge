@@ -13,7 +13,10 @@ back, as fast as the plugin goes, so nothing crackles on a busy computer.
 
 1. Download [`oros-bridge-windows-x64.exe`](https://github.com/koulaxizis/oros-bridge/releases/latest/download/oros-bridge-windows-x64.exe)
    from the [latest release](https://github.com/koulaxizis/oros-bridge/releases/latest)
-   and run it; it needs no setup. Keep its window open while you use Studio.
+   and run it; it needs no setup. Its window shows whether Studio is
+   connected and which plugins it found. Closing or minimising the window
+   keeps the bridge running in the tray (by the clock); right-click the
+   icon for Open, Start with Windows and Quit.
    It is not signed yet, so Windows SmartScreen may ask once
    (More info → Run anyway).
 2. In Studio, open a track's settings and press `Plugin on this computer`. The bridge window shows a 6-digit code;
@@ -22,8 +25,10 @@ back, as fast as the plugin goes, so nothing crackles on a busy computer.
    `...\CLAP` and the same folders under your user). Pick one for a track,
    open its window to set it up, then freeze the track.
 
-`oros-bridge --forget-pairings` forgets every browser you paired.
-`oros-bridge --scan` lists the plugins it finds.
+The window's `Forget paired browsers` (or `oros-bridge --forget-pairings`)
+forgets every browser you paired. `oros-bridge --scan` lists the plugins it
+finds, `oros-bridge --console` runs it in the console without a window, and
+`oros-bridge --tray` starts it hidden in the tray.
 
 ## Safety
 

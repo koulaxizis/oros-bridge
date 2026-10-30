@@ -19,7 +19,7 @@ public:
   void start();                                        // new code, shown on this computer
   std::string tryCode(const std::string& code);        // token, or "" when wrong
   bool active();
-  std::string currentCodeForTests();
+  std::string currentCode();                           // "" when no code is open
 
 private:
   std::mutex mu_;
@@ -51,6 +51,7 @@ public:
   void run();          // accepts until stop()
   void stop();
   uint16_t port() const { return opt_.port; }
+  int connections() const { return live_; }   // open connections now
 
 private:
   void handle(intptr_t sock);
