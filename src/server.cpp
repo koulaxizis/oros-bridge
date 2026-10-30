@@ -45,7 +45,7 @@ bool Pairing::active() {
   return !code_.empty();
 }
 
-std::string Pairing::currentCodeForTests() {
+std::string Pairing::currentCode() {
   std::lock_guard<std::mutex> g(mu_);
   return code_;
 }

@@ -32,6 +32,23 @@ native code, so a separate program hosts them and Studio talks to it.
    CLAP 1.2.9, nlohmann/json 3.11.3. No JUCE, no VSTGUI.
 7. **Windows first.** The code builds and its tests run on Linux too (CI
    runs both), but plugin windows are Win32 only for now; macOS later.
+8. **A window and a tray icon on Windows (0.2.0).** The exe is a window
+   program (`WIN32_EXECUTABLE`, entry `mainCRTStartup`) instead of a
+   console. The window (`src/gui_win32.cpp`) shows whether Studio is
+   connected, the pairing code in large type, the plugins found and their
+   folders, and buttons to look for plugins and to forget paired browsers.
+   Closing or minimising hides it to the tray (a one-time hint the first
+   time); the tray menu has Open, Start with Windows (HKCU `Run`, value
+   `orOS Bridge` = `"<exe>" --tray`, off until the person turns it on) and
+   Quit. When a page asks to pair, the window comes up (plus a tray
+   notification if it was hidden). One bridge per user (mutex
+   `Local\orOS-Bridge`): a second launch shows the first one's window and
+   ends. Greek when the Windows display language is Greek, English
+   otherwise. The process stays DPI-unaware so plugin editors do not change;
+   only the bridge's own window is created system-DPI-aware. `--console`
+   keeps the command-line program (the tests use it); `--scan`,
+   `--forget-pairings` and `--help` write to the console they were started
+   from. Other systems have no window (`src/gui_none.cpp`).
 
 ## Protocol (WebSocket, `ws://127.0.0.1:47621/`)
 

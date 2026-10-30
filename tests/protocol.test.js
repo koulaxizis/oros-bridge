@@ -24,7 +24,7 @@ test.before(async () => {
   assert.ok(BRIDGE && PLUGINS, "set OROS_BRIDGE and OROS_TEST_PLUGINS");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "oros-bridge-"));
   fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify({ folders: [PLUGINS] }));
-  proc = spawn(BRIDGE, ["--port", "0", "--config-dir", dir, "--allow-origin", ORIGIN], { stdio: ["ignore", "pipe", "inherit"] });
+  proc = spawn(BRIDGE, ["--console", "--port", "0", "--config-dir", dir, "--allow-origin", ORIGIN], { stdio: ["ignore", "pipe", "inherit"] });
   await new Promise((res, rej) => {
     proc.on("exit", (c) => rej(new Error("bridge exited " + c)));
     proc.stdout.on("data", (d) => {

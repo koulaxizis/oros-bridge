@@ -1,7 +1,7 @@
 # orOS Bridge: hosts the person's own VST3 and CLAP plugins for orOS Studio,
 # on this computer only (127.0.0.1). See DESIGN.md.
 cmake_minimum_required(VERSION 3.28)
-project(oros_bridge VERSION 0.1.0 LANGUAGES C CXX)
+project(oros_bridge VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -76,6 +76,21 @@ endif()
 
 add_executable(oros-bridge src/main.cpp)
 target_link_libraries(oros-bridge PRIVATE bridge_core)
+if(WIN32)
+  # a window and a tray icon instead of a console (--console keeps the old way)
+  set(OROS_BRIDGE_ICO ${CMAKE_CURRENT_SOURCE_DIR}/res/oros-bridge.ico)
+  set(OROS_BRIDGE_MANIFEST ${CMAKE_CURRENT_SOURCE_DIR}/res/oros-bridge.manifest)
+  configure_file(res/oros-bridge.rc.in ${CMAKE_CURRENT_BINARY_DIR}/oros-bridge.rc @ONLY)
+  target_sources(oros-bridge PRIVATE src/gui_win32.cpp ${CMAKE_CURRENT_BINARY_DIR}/oros-bridge.rc)
+  set_target_properties(oros-bridge PROPERTIES WIN32_EXECUTABLE ON)
+  target_link_libraries(oros-bridge PRIVATE comctl32 advapi32)
+  if(MSVC)
+    # main() stays the entry point; our manifest is in the .rc
+    target_link_options(oros-bridge PRIVATE /ENTRY:mainCRTStartup /MANIFEST:NO)
+  endif()
+else()
+  target_sources(oros-bridge PRIVATE src/gui_none.cpp)
+endif()
 
 if(OROS_BRIDGE_TESTS)
   enable_testing()
