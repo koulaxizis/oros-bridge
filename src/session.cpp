@@ -1,0 +1,229 @@
+#include "session.h"
+#include <chrono>
+#include <cstring>
+#include <thread>
+#include "base64.h"
+#include "editor.h"
+#include "mainloop.h"
+#include "scan.h"
+
+namespace ob {
+
+Session::Session(Connection& conn, Config& cfg, Pairing& pairing) : conn_(conn), cfg_(cfg), pairing_(pairing) {
+  nlohmann::json hello = {{"event", "hello"}, {"app", "oros-bridge"}, {"version", OROS_BRIDGE_VERSION},
+                          {"editors", EditorWindow::supported()}};
+  conn_.sendText(hello.dump());
+}
+
+Session::~Session() {
+  auto all = std::move(open_);
+  MainLoop::get().call([&all] {
+    for (auto& kv : all) {
+      kv.second->plugin->closeEditor();
+      kv.second->plugin.reset();
+    }
+    return 0;
+  });
+}
+
+void Session::reply(const nlohmann::json& m, nlohmann::json out) {
+  if (m.contains("id")) out["id"] = m["id"];
+  conn_.sendText(out.dump());
+}
+
+void Session::onText(const std::string& text) {
+  nlohmann::json m;
+  try {
+    m = nlohmann::json::parse(text);
+  } catch (...) {
+    conn_.sendText(R"({"ok":false,"error":"bad json"})");
+    return;
+  }
+  if (!m.is_object() || !m.contains("op") || !m["op"].is_string()) {
+    reply(m.is_object() ? m : nlohmann::json::object(), {{"ok", false}, {"error", "no op"}});
+    return;
+  }
+  nlohmann::json out;
+  try {
+    out = command(m);
+  } catch (const std::exception& e) {
+    out = {{"ok", false}, {"error", std::string("bad request: ") + e.what()}};
+  }
+  reply(m, out);
+}
+
+static nlohmann::json fail(const std::string& e) { return {{"ok", false}, {"error", e}}; }
+
+nlohmann::json Session::command(const nlohmann::json& m) {
+  const std::string op = m["op"];
+  // ----- before the page is known -----
+  if (op == "pair") {
+    if (!m.contains("code")) {
+      pairing_.start();
+      return {{"ok", true}, {"shown", true}};
+    }
+    auto token = pairing_.tryCode(m["code"].get<std::string>());
+    if (token.empty()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));   // slows down guessing
+      return fail(pairing_.active() ? "wrong code" : "wrong code, ask for a new one");
+    }
+    authed_ = true;
+    return {{"ok", true}, {"token", token}};
+  }
+  if (op == "auth") {
+    authed_ = cfg_.hasToken(m.value("token", ""));
+    if (!authed_) std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    return authed_ ? nlohmann::json{{"ok", true}} : fail("unknown token");
+  }
+  if (!authed_) return fail("not paired");
+
+  // ----- plugins on this computer -----
+  if (op == "list") return {{"ok", true}, {"plugins", cfg_.plugins()}};
+  if (op == "scan") {
+    auto list = scanPlugins(cfg_, m.value("full", false), [this](const std::string& path) {
+      conn_.sendText(nlohmann::json{{"event", "scanning"}, {"path", path}}.dump());
+    });
+    return {{"ok", true}, {"plugins", list}};
+  }
+  if (op == "folders") return {{"ok", true}, {"defaults", Config::defaultFolders()}, {"extra", cfg_.extraFolders()}};
+  if (op == "setFolders") {
+    std::vector<std::string> f;
+    if (!m.contains("extra") || !m["extra"].is_array()) return fail("bad folders");
+    for (auto& x : m["extra"]) {
+      if (!x.is_string()) return fail("bad folder");
+      auto s = x.get<std::string>();
+      if (s.empty() || s.size() > 1024) return fail("bad folder");
+      f.push_back(s);
+    }
+    if (f.size() > 32) return fail("too many folders");
+    cfg_.setExtraFolders(f);
+    return {{"ok", true}};
+  }
+
+  // ----- open plugins -----
+  if (op == "open") {
+    if (open_.size() >= kMaxOpen) return fail("too many open plugins");
+    PluginInfo info;
+    if (!cfg_.find(m.value("plugin", ""), info)) return fail("unknown plugin");
+    double sr = m.value("sr", 48000.0);
+    uint32_t block = m.value("block", 1024u);
+    if (sr < 8000 || sr > 384000 || block < 16 || block > 16384) return fail("bad sample rate or block size");
+    std::string err;
+    auto o = std::make_shared<Open>();
+    o->info = info;
+    o->maxFrames = block;
+    bool ok = MainLoop::get().call([&] {
+      o->plugin = openPlugin(info, err);
+      if (!o->plugin) return false;
+      if (!o->plugin->activate(sr, block, err)) { o->plugin.reset(); return false; }
+      return true;
+    });
+    if (!ok) return fail(err.empty() ? "could not open" : err);
+    int h = nextHandle_++;
+    open_[h] = o;
+    return MainLoop::get().call([&] {
+      return nlohmann::json{{"ok", true}, {"h", h}, {"inputs", o->plugin->inputs()}, {"outputs", o->plugin->outputs()},
+                            {"latency", o->plugin->latency()}, {"tail", o->plugin->tail()},
+                            {"editor", o->plugin->hasEditor()}, {"instrument", info.instrument}};
+    });
+  }
+  int h = m.value("h", 0);
+  auto it = open_.find(h);
+  if (it == open_.end()) return fail("unknown handle");
+  auto o = it->second;
+  if (op == "close") {
+    open_.erase(it);
+    MainLoop::get().call([&] { o->plugin->closeEditor(); o->plugin.reset(); return 0; });
+    return {{"ok", true}};
+  }
+  if (op == "info") {
+    return MainLoop::get().call([&] {
+      return nlohmann::json{{"ok", true}, {"latency", o->plugin->latency()}, {"tail", o->plugin->tail()},
+                            {"dirty", o->plugin->dirty()}};
+    });
+  }
+  if (op == "reset") {
+    MainLoop::get().call([&] { o->plugin->reset(); return 0; });
+    return {{"ok", true}};
+  }
+  if (op == "getState") {
+    std::vector<uint8_t> st;
+    bool ok = MainLoop::get().call([&] { return o->plugin->getState(st); });
+    if (!ok) return fail("the plugin did not give its state");
+    return {{"ok", true}, {"data", base64Encode(st)}};
+  }
+  if (op == "setState") {
+    std::vector<uint8_t> st;
+    if (!base64Decode(m.value("data", ""), st)) return fail("bad state");
+    bool ok = MainLoop::get().call([&] { return o->plugin->setState(st); });
+    return ok ? nlohmann::json{{"ok", true}} : fail("the plugin refused the state");
+  }
+  if (op == "editor") {
+    std::string err;
+    auto title = o->info.name + " - orOS Studio";
+    bool ok = MainLoop::get().call([&] {
+      return o->plugin->openEditor(title, [this, h] {
+        conn_.sendText(nlohmann::json{{"event", "editorClosed"}, {"h", h}}.dump());
+      }, err);
+    });
+    return ok ? nlohmann::json{{"ok", true}} : fail(err);
+  }
+  if (op == "closeEditor") {
+    MainLoop::get().call([&] { o->plugin->closeEditor(); return 0; });
+    return {{"ok", true}};
+  }
+  return fail("unknown op");
+}
+
+// A block to render: "ORB1", u32 handle, u32 seq, u32 frames, u16 channels,
+// u16 events, events (u32 frame, status, data1, data2, 0), float32 planar.
+// The answer has the same header with the output channels and no events.
+void Session::onBinary(const std::vector<uint8_t>& d) {
+  auto u32 = [&](size_t at) { return uint32_t(d[at]) | uint32_t(d[at + 1]) << 8 | uint32_t(d[at + 2]) << 16 | uint32_t(d[at + 3]) << 24; };
+  auto u16 = [&](size_t at) { return uint32_t(d[at]) | uint32_t(d[at + 1]) << 8; };
+  auto error = [&](uint32_t h, uint32_t seq, const std::string& e) {
+    conn_.sendText(nlohmann::json{{"event", "renderError"}, {"h", h}, {"seq", seq}, {"error", e}}.dump());
+  };
+  if (!authed_) { error(0, 0, "not paired"); return; }
+  if (d.size() < 20 || std::memcmp(d.data(), "ORB1", 4) != 0) { error(0, 0, "bad block"); return; }
+  uint32_t h = u32(4), seq = u32(8), frames = u32(12), nch = u16(16), nev = u16(18);
+  auto it = open_.find(int(h));
+  if (it == open_.end()) { error(h, seq, "unknown handle"); return; }
+  auto o = it->second;
+  size_t need = 20 + size_t(nev) * 8 + size_t(nch) * frames * 4;
+  if (!frames || frames > o->maxFrames || nch > kMaxChannels || d.size() != need) { error(h, seq, "bad block size"); return; }
+  std::vector<MidiEvent> events;
+  for (uint32_t i = 0; i < nev; i++) {
+    size_t at = 20 + size_t(i) * 8;
+    events.push_back({u32(at), d[at + 4], uint8_t(d[at + 5] & 127), uint8_t(d[at + 6] & 127)});
+  }
+  const uint8_t* audio = d.data() + 20 + size_t(nev) * 8;
+  std::vector<uint8_t> out;
+  bool ok = MainLoop::get().call([&] {
+    auto& p = *o->plugin;
+    uint32_t ins = p.inputs(), outs = p.outputs();
+    std::vector<std::vector<float>> inBuf(ins, std::vector<float>(frames, 0.f));
+    for (uint32_t c = 0; c < ins && nch; c++) {
+      uint32_t from = std::min(c, nch - 1);   // mono in: the same on both sides
+      std::memcpy(inBuf[c].data(), audio + size_t(from) * frames * 4, size_t(frames) * 4);
+    }
+    std::vector<const float*> inPtr;
+    for (auto& b : inBuf) inPtr.push_back(b.data());
+    out.assign(20 + size_t(outs) * frames * 4, 0);
+    std::vector<float*> outPtr;
+    for (uint32_t c = 0; c < outs; c++) outPtr.push_back(reinterpret_cast<float*>(out.data() + 20 + size_t(c) * frames * 4));
+    // the output buffer may not be float-aligned in a vector<uint8_t>: render into floats, then copy
+    std::vector<std::vector<float>> tmp(outs, std::vector<float>(frames, 0.f));
+    for (uint32_t c = 0; c < outs; c++) outPtr[c] = tmp[c].data();
+    if (!p.process(inPtr.data(), outPtr.data(), frames, events)) return false;
+    for (uint32_t c = 0; c < outs; c++) std::memcpy(out.data() + 20 + size_t(c) * frames * 4, tmp[c].data(), size_t(frames) * 4);
+    std::memcpy(out.data(), "ORB1", 4);
+    for (int i = 0; i < 4; i++) { out[4 + i] = uint8_t(h >> (8 * i)); out[8 + i] = uint8_t(seq >> (8 * i)); out[12 + i] = uint8_t(frames >> (8 * i)); }
+    out[16] = uint8_t(outs);
+    out[17] = 0;
+    return true;
+  });
+  if (!ok) { error(h, seq, "the plugin failed"); return; }
+  conn_.sendBinary(out);
+}
+}
