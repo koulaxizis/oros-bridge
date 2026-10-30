@@ -1,0 +1,80 @@
+# orOS Bridge: design
+
+Wave 4 of "free sounds in Studio" (orOS Bible Part IX, 2026-10-30): let
+Studio use the person's own VST3 and CLAP plugins. A browser cannot load
+native code, so a separate program hosts them and Studio talks to it.
+
+## Decisions
+
+1. **Render first ("freeze").** Studio sends a track's audio (and notes, for
+   an instrument) block by block and gets the processed audio back, as fast
+   as the plugin goes. The study measured live round trips through a
+   worklet, a Worker and a WebSocket: fine at rest, rare dropouts when the
+   page is busy. A live mode (latency reported as plugin delay) can come
+   later on the same protocol.
+2. **127.0.0.1 only**, port 47621. A request must name `127.0.0.1:port` or
+   `localhost:port` as its Host (no DNS rebinding) and come from a listed
+   Origin (`https://useoros.online`, `https://www.useoros.online`, plus
+   `--allow-origin` for development). `/status` answers allowed pages with
+   CORS and `Access-Control-Allow-Private-Network: true`.
+3. **Pairing.** A page asks (`pair`), the bridge shows a 6-digit code in its
+   own window, the page sends it back and receives a 256-bit token; only a
+   SHA-1 of it is stored (`config.json`, at most 16). Three wrong codes end
+   the code; each wrong try waits 500 ms. After that the page sends `auth`.
+4. **Every plugin call on one main thread** (`MainLoop`), which also runs the
+   plugins' windows (Win32 message loop). Network threads hand work over and
+   wait. Plugins are processed offline (`kOffline` for VST 3), so a plugin may
+   use its best quality.
+5. **Scanning in a child process** (`oros-bridge --describe <format> <path>`,
+   30 s limit): a crash or hang leaves that file out. Results are kept with
+   each file's modification time and only changed files are read again.
+6. **No third-party code beyond MIT**: VST 3 SDK 3.8.1 (MIT since 3.8.0),
+   CLAP 1.2.9, nlohmann/json 3.11.3. No JUCE, no VSTGUI.
+7. **Windows first.** The code builds and its tests run on Linux too (CI
+   runs both), but plugin windows are Win32 only for now; macOS later.
+
+## Protocol (WebSocket, `ws://127.0.0.1:47621/`)
+
+Text messages are JSON. A command carries `op` and an optional `id`; the
+answer repeats the `id` and has `ok` (and `error` when false). Events have
+`event` instead.
+
+| op | fields | answer |
+|---|---|---|
+| `pair` | (none) | `shown`: a code is on the bridge's screen |
+| `pair` | `code` | `token` |
+| `auth` | `token` | `ok` |
+| `list` | | `plugins`: [{id, format, name, vendor, version, path, instrument}] |
+| `scan` | `full`? | `plugins`; events `scanning` {path} meanwhile |
+| `folders` / `setFolders` | `extra`: [paths] | the default and extra plugin folders |
+| `open` | `plugin`, `sr` (8000..384000), `block` (16..16384) | `h`, `inputs`, `outputs`, `latency`, `tail`, `editor`, `instrument` |
+| `info` | `h` | `latency`, `tail`, `dirty` |
+| `getState` / `setState` | `h`, `data` (base64) | the plugin's state (VST 3: `OBV3` + component + controller, each with its length) |
+| `reset` | `h` | the plugin forgets its sound (a new render) |
+| `editor` / `closeEditor` | `h` | the plugin's window; event `editorClosed` {h} when the person closes it |
+| `close` | `h` | |
+
+Events: `hello` {app, version, editors} on connect, `scanning`,
+`editorClosed`, `renderError` {h, seq, error}.
+
+A block to render is a binary message, little endian:
+
+```
+"ORB1" | u32 h | u32 seq | u32 frames | u16 channels | u16 events
+events × (u32 frame | u8 status | u8 data1 | u8 data2 | u8 0)
+channels × frames × float32 (planar)
+```
+
+The answer has the same header with the plugin's output channel count and no
+events. A mono input feeds every input channel. Blocks of one plugin are
+processed in order; the first `latency` frames of a render are the plugin's
+delay and Studio drops them, then sends `tail` frames of silence so reverbs
+finish.
+
+## Tests
+
+`tests/protocol.test.js` runs a real bridge with our own test plugins
+(`tests/test_plugins.c`: a CLAP gain with 32 frames of latency and a CLAP
+sine instrument; `tests/vst3_test_gain.cpp`: a VST 3 gain) and checks the
+origin and host rules, pairing, scanning, rendering (exact samples, notes at
+their frame), state in both formats and bad requests.
