@@ -1,6 +1,7 @@
 /* Two tiny CLAP plugins for the bridge's tests (MIT, orOS):
  *   oros.test.gain  effect: out = in delayed by 32 frames (latency 32) x gain (state, default 0.5)
  *   oros.test.sine  instrument: a sine per held note, amplitude = velocity / 4 */
+#define _USE_MATH_DEFINES /* M_PI on MSVC */
 #include <clap/clap.h>
 #include <math.h>
 #include <stdlib.h>
