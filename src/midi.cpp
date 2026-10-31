@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <thread>
 
 #ifdef _WIN32
@@ -14,7 +15,6 @@
 #include <poll.h>
 #include <unistd.h>
 #include <fstream>
-#include <map>
 #include <regex>
 #include <sstream>
 #endif
