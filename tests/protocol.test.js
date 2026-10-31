@@ -19,14 +19,23 @@ const IS_WIN = process.platform === "win32";
 // plugin windows: Win32, or X11 on Linux when there is a display (CI runs the Linux tests under Xvfb)
 const EDITORS = IS_WIN || (process.platform === "linux" && !!process.env.DISPLAY);
 
-let proc, port, out = "";
+let proc, port, codeFile, out = "";
+
+async function waitFor(cond, what, ms = 2000) {
+  const end = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > end) assert.fail("timed out waiting for " + what);
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
 const codes = [];
 
 test.before(async () => {
   assert.ok(BRIDGE && PLUGINS, "set OROS_BRIDGE and OROS_TEST_PLUGINS");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "oros-bridge-"));
   fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify({ folders: [PLUGINS] }));
-  const args = ["--console", "--port", "0", "--config-dir", dir, "--allow-origin", ORIGIN, "--test-audio"];
+  codeFile = path.join(dir, "code.txt");
+  const args = ["--console", "--port", "0", "--config-dir", dir, "--allow-origin", ORIGIN, "--test-audio", "--code-file", codeFile];
   if (process.env.OROS_TEST_AUDIO_MODULE) args.push("--audio-module", process.env.OROS_TEST_AUDIO_MODULE);
   proc = spawn(BRIDGE, args, { stdio: ["ignore", "pipe", "inherit"] });
   await new Promise((res, rej) => {
@@ -198,10 +207,14 @@ test("pairing: nothing before it, a wrong code fails, the right one gives a toke
   await new Promise((r) => setTimeout(r, 100));
   const code = codes[codes.length - 1];
   assert.match(code, /^\d{6}$/);
+  // --code-file: the open code is in the file while it is open, and gone after
+  await waitFor(() => fs.existsSync(codeFile), "the code file");
+  assert.equal(fs.readFileSync(codeFile, "utf8"), code + "\n");
   const wrong = code === "000000" ? "111111" : "000000";
   assert.equal((await c.cmd({ op: "pair", code: wrong })).error, "wrong code");
   const r = await c.cmd({ op: "pair", code });
   assert.equal(r.ok, true);
+  await waitFor(() => !fs.existsSync(codeFile), "the code file removed");
   assert.match(r.token, /^[0-9a-f]{64}$/);
   token = r.token;
   assert.equal((await c.cmd({ op: "list" })).ok, true);

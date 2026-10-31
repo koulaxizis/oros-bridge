@@ -85,6 +85,8 @@ track.
 The window's `Forget paired browsers` (or `oros-bridge --forget-pairings`)
 forgets every browser you paired. `oros-bridge --scan` lists the plugins it
 finds, `oros-bridge --console` runs it in the console without a window, and
+`oros-bridge --code-file PATH` keeps the open pairing code in a file for a
+system that shows it itself (orOS USB does), and
 `oros-bridge --tray` starts it hidden in the tray (`Start with Windows`, or
 `Start when I log in` on Linux, uses it).
 

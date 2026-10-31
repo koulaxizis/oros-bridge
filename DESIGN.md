@@ -163,6 +163,13 @@ native code, so a separate program hosts them and Studio talks to it.
    the tar.gz (`packaging/linux/package-all.sh`); build.yml makes and
    installs them on every PR.
 
+14. **The pairing code in a file (0.7.1).** orOS USB runs the bridge with
+   no window of its own (inside its kiosk session, `--console`), so
+   `--code-file PATH` keeps the open code in PATH ("123456\n", written to a
+   temporary file and renamed) and removes it when the code is used or
+   ended; the file is removed at start too. orOS USB's System button reads
+   it and shows the code over orOS.
+
 ## Protocol (WebSocket, `ws://127.0.0.1:47621/`)
 
 Text messages are JSON. A command carries `op` and an optional `id`; the
@@ -227,7 +234,7 @@ finish.
 `tests/protocol.test.js` runs a real bridge with our own test plugins
 (`tests/test_plugins.c`: a CLAP gain with 32 frames of latency and a CLAP
 sine instrument; `tests/vst3_test_gain.cpp`: a VST 3 gain) and checks the
-origin and host rules, pairing, scanning, rendering (exact samples, notes at
+origin and host rules, pairing (and the code file), scanning, rendering (exact samples, notes at
 their frame), state in both formats and bad requests. With `--test-audio`
 the bridge also offers a loopback card (4 inputs, 2 outputs, every output
 back on an input 333 frames later, in real time), and the test checks that a
