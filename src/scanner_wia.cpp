@@ -184,8 +184,15 @@ HRESULT openItems(IWiaDevMgr2* mgr, const std::string& id, Items& it) {
       it.flatbed.p = c.p;
       c.p = nullptr;
     } else if (cat == WIA_CATEGORY_FEEDER && !it.feeder) {
+      // duplex: the feeder item says so (WIA 2.0), else the device root (the same property id)
       LONG caps = 0;
-      if (readLong(ps.p, WIA_IPS_DOCUMENT_HANDLING_CAPABILITIES, caps)) it.duplex = (caps & DUP) != 0;
+      bool known = readLong(ps.p, WIA_DPS_DOCUMENT_HANDLING_CAPABILITIES, caps);
+      if (!known) {
+        Com<IWiaPropertyStorage> rps;
+        if (SUCCEEDED(it.root->QueryInterface(IID_IWiaPropertyStorage, (void**)rps.put())))
+          known = readLong(rps.p, WIA_DPS_DOCUMENT_HANDLING_CAPABILITIES, caps);
+      }
+      if (known) it.duplex = (caps & DUP) != 0;
       it.feeder.p = c.p;
       c.p = nullptr;
     }
