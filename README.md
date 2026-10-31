@@ -5,7 +5,8 @@ plugins installed on your computer. orOS Bridge is a small program you run on
 the computer: Studio talks to it over `127.0.0.1` (never the network), and it
 runs your plugins for Studio.
 
-Free, MIT, no account. First version: **Windows**, plugins render ahead of
+Free, MIT, no account. It also records through your sound card (below).
+First version: **Windows**, plugins render ahead of
 time ("freeze"): Studio sends a track through the plugin and gets the sound
 back, as fast as the plugin goes, so nothing crackles on a busy computer.
 
@@ -24,6 +25,15 @@ back, as fast as the plugin goes, so nothing crackles on a busy computer.
 3. Studio lists your plugins (from `C:\Program Files\Common Files\VST3`,
    `...\CLAP` and the same folders under your user). Pick one for a track,
    open its window to set it up, then freeze the track.
+
+### Record through your sound card (0.3.0)
+
+In Studio › Settings › Sound card, choose `orOS Bridge` and your card:
+Windows Audio (WASAPI, with exclusive mode for the lowest delay), JACK,
+PipeWire/PulseAudio or ALSA. Studio then records through the bridge: every
+input you pick goes to its own track, in step with what you hear, even when
+the computer is busy. Listen through your card's own monitoring (direct
+monitor). ASIO comes later as a separate module.
 
 The window's `Forget paired browsers` (or `oros-bridge --forget-pairings`)
 forgets every browser you paired. `oros-bridge --scan` lists the plugins it

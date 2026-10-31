@@ -1,9 +1,13 @@
 #pragma once
+#include <atomic>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <string>
 #include <vector>
 #include <nlohmann/json.hpp>
+#include "audio.h"
 #include "config.h"
 #include "plugin.h"
 #include "server.h"
@@ -20,6 +24,9 @@ public:
 
 private:
   nlohmann::json command(const nlohmann::json& m);
+  nlohmann::json audioCommand(const std::string& op, const nlohmann::json& m);
+  void playBlock(const std::vector<uint8_t>& d);
+  void meters();
   void reply(const nlohmann::json& m, nlohmann::json out);
   Connection& conn_;
   Config& cfg_;
@@ -32,6 +39,11 @@ private:
     uint32_t maxFrames = 0;
   };
   std::map<int, std::shared_ptr<Open>> open_;
+  // the sound card (one per page), and the thread that sends its meters
+  std::mutex audioMu_;
+  AudioEngine audio_;
+  std::thread meterThread_;
+  std::atomic<bool> meterQuit_{false};
 };
 
 constexpr size_t kMaxOpen = 64;
