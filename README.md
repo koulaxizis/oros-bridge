@@ -90,6 +90,30 @@ system that shows it itself (orOS USB does), and
 `oros-bridge --tray` starts it hidden in the tray (`Start with Windows`, or
 `Start when I log in` on Linux, uses it).
 
+### New versions (0.8.0)
+
+A minute after it starts, and then once a day, the bridge asks GitHub for
+its latest release. When a newer one is out, the window shows it with an
+`Update` button and the tray menu gets `Update to …`; nothing pops up.
+`Update` downloads the new version, checks every file against the release's
+`SHA256SUMS.txt`, puts it in place of this copy and starts the bridge again:
+
+- Windows: the exe, and `oros-bridge-asio.dll` when it is beside it (the
+  old ones stay as `.old` until the next start);
+- Linux: the AppImage, or the `.deb` / `.rpm` through your package tool
+  (your password is asked by `pkexec`), or the program from the tar.gz.
+
+A copy in a folder you cannot write gets the release page instead. The tray
+menu's `Tell me about new versions` turns the checks off; only the request
+for the latest release goes out, nothing about you or your plugins.
+`oros-bridge --check-update` says whether a newer version is out and
+`oros-bridge --update` installs it from a terminal.
+
+orOS Portable and the orOS installers carry the bridge and start it with
+`--bundled` (no window, no console, the pairing code shown over orOS through
+`--code-file`); such a copy, and any copy with an `oros-bridge.bundled` file
+beside it, never updates itself: a new orOS brings the new bridge.
+
 ## Safety
 
 - It listens on `127.0.0.1` only, so other computers cannot reach it.

@@ -186,6 +186,17 @@ nlohmann::json Config::stamps() {
   return data_.value("stamps", nlohmann::json::object());
 }
 
+bool Config::updateCheck() {
+  std::lock_guard<std::mutex> g(mu_);
+  auto v = data_.find("updateCheck");
+  return v == data_.end() || !v->is_boolean() || v->get<bool>();
+}
+
+void Config::setUpdateCheck(bool on) {
+  { std::lock_guard<std::mutex> g(mu_); data_["updateCheck"] = on; }
+  save();
+}
+
 const PluginInfo* Config::find(const std::string& id, PluginInfo& out) {
   for (auto& p : plugins())
     if (p.id == id) { out = p; return &out; }

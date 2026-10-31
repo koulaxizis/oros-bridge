@@ -11,6 +11,7 @@
 #include <thread>
 #include "mainloop.h"
 #include "scan.h"
+#include "update.h"
 
 namespace ob {
 namespace {
@@ -23,11 +24,13 @@ constexpr wchar_t kClass[] = L"OrosBridgeMain";
 constexpr wchar_t kTitle[] = L"orOS Bridge";
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValue[] = L"orOS Bridge";
-enum { ID_SCAN = 101, ID_FORGET, ID_AUTOSTART, ID_HIDE, ID_OPEN, ID_QUIT };
+enum { ID_SCAN = 101, ID_FORGET, ID_AUTOSTART, ID_HIDE, ID_OPEN, ID_QUIT, ID_UPDATE, ID_UPDATECHECK };
 
 struct Strings {
   const wchar_t *ready, *connected, *pairLabel, *hint, *plugins, *noPlugins, *scanning, *folders,
       *scan, *forget, *autostart, *hide, *forgetAsk, *trayHint, *codeTip, *open, *quit, *cannotStart;
+  // 0.8.0: new versions
+  const wchar_t *updOut, *updButton, *updPage, *updating, *updCheck, *updTray, *updDownload, *updChecksum, *updInstall, *updFiles;
 };
 const Strings kEn = {
     L"Ready. orOS Studio can connect.",
@@ -48,6 +51,16 @@ const Strings kEn = {
     L"Open",
     L"Quit",
     L"orOS Bridge could not start:",
+    L"orOS Bridge %ls is out.",
+    L"Update",
+    L"Download page",
+    L"Updating to %ls…",
+    L"Tell me about new versions",
+    L"Update to %ls",
+    L"The update could not be downloaded. Try again later.",
+    L"The download did not match its checksum and was not used.",
+    L"The update was not installed.",
+    L"The program file could not be replaced.",
 };
 const Strings kEl = {
     L"Έτοιμο. Το orOS Studio μπορεί να συνδεθεί.",
@@ -68,6 +81,16 @@ const Strings kEl = {
     L"Άνοιγμα",
     L"Έξοδος",
     L"Το orOS Bridge δεν μπόρεσε να ξεκινήσει:",
+    L"Κυκλοφόρησε το orOS Bridge %ls.",
+    L"Ενημέρωση",
+    L"Σελίδα λήψης",
+    L"Ενημέρωση σε %ls…",
+    L"Ενημέρωσέ με για νέες εκδόσεις",
+    L"Ενημέρωση σε %ls",
+    L"Η ενημέρωση δεν κατέβηκε. Δοκίμασε ξανά αργότερα.",
+    L"Η λήψη δεν ταίριαξε με το checksum της και δεν χρησιμοποιήθηκε.",
+    L"Η ενημέρωση δεν εγκαταστάθηκε.",
+    L"Το αρχείο του προγράμματος δεν μπόρεσε να αντικατασταθεί.",
 };
 
 const Strings& strings() {
@@ -89,6 +112,9 @@ struct Gui {
   HWND hwnd = nullptr;
   HWND status = nullptr, pairLabel = nullptr, code = nullptr, plugins = nullptr, folders = nullptr;
   HWND scan = nullptr, autostart = nullptr;
+  HWND updText = nullptr, updButton = nullptr;
+  std::wstring shownUpdate = L"-";
+  bool updRow = false;
   HFONT font = nullptr, bold = nullptr, big = nullptr;
   HICON icon = nullptr, iconSm = nullptr;
   NOTIFYICONDATAW nid{};
@@ -220,6 +246,54 @@ void refreshPlugins() {
   }
 }
 
+// a newer release: a line and a button at the bottom (the window grows by it); nothing pops up
+constexpr int kBaseH = 350, kUpdH = 36;
+void fitWindow(bool withUpdate) {
+  RECT r{0, 0, px(460), px(kBaseH + (withUpdate ? kUpdH : 0))};
+  AdjustWindowRectEx(&r, DWORD(GetWindowLongPtrW(g.hwnd, GWL_STYLE)), FALSE, 0);
+  SetWindowPos(g.hwnd, nullptr, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+std::wstring withVersion(const wchar_t* fmt, const std::string& tag) {
+  wchar_t buf[256];
+  std::swprintf(buf, 256, fmt, wide(tag.size() > 1 ? tag.substr(1) : tag).c_str());
+  return buf;
+}
+void refreshUpdate() {
+  auto u = update::state();
+  std::wstring text;
+  if (!u.tag.empty()) {
+    if (u.busy) text = withVersion(g.s->updating, u.tag);
+    else if (u.error == "download") text = g.s->updDownload;
+    else if (u.error == "checksum") text = g.s->updChecksum;
+    else if (u.error == "install") text = g.s->updInstall;
+    else if (!u.error.empty()) text = g.s->updFiles;
+    else text = withVersion(g.s->updOut, u.tag);
+  }
+  std::wstring key = text + (u.busy ? L"|b" : L"") + (u.canInstall && u.error.empty() ? L"|i" : L"");
+  if (key == g.shownUpdate) return;
+  g.shownUpdate = key;
+  SetWindowTextW(g.updText, text.c_str());
+  // installs where this copy can, otherwise (or after a failure) the release page
+  SetWindowTextW(g.updButton, u.canInstall && u.error.empty() ? g.s->updButton : g.s->updPage);
+  EnableWindow(g.updButton, !u.busy);
+  ShowWindow(g.updText, text.empty() ? SW_HIDE : SW_SHOW);
+  ShowWindow(g.updButton, text.empty() ? SW_HIDE : SW_SHOW);
+  if (g.updRow != !text.empty()) {
+    g.updRow = !text.empty();
+    fitWindow(g.updRow);
+  }
+}
+void runUpdate() {
+  auto u = update::state();
+  if (u.tag.empty() || u.busy) return;
+  if (!u.canInstall || !u.error.empty()) {
+    update::openPage(update::releasePage(u.tag));
+    return;
+  }
+  update::installAsync([] { quit(); });   // the new bridge has started: this one ends
+  refreshUpdate();
+}
+
 void startScan() {
   if (g.scanning.exchange(true)) return;
   refreshPlugins();
@@ -240,6 +314,10 @@ void trayMenu() {
   HMENU m = CreatePopupMenu();
   AppendMenuW(m, MF_STRING, ID_OPEN, g.s->open);
   AppendMenuW(m, MF_STRING | (autostartOn() ? MF_CHECKED : 0), ID_AUTOSTART, g.s->autostart);
+  if (!update::bundled()) AppendMenuW(m, MF_STRING | (g.cfg->updateCheck() ? MF_CHECKED : 0), ID_UPDATECHECK, g.s->updCheck);
+  auto u = update::state();
+  std::wstring updItem = withVersion(g.s->updTray, u.tag);
+  if (!u.tag.empty() && !u.busy) AppendMenuW(m, MF_STRING, ID_UPDATE, updItem.c_str());
   AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(m, MF_STRING, ID_QUIT, g.s->quit);
   SetMenuDefaultItem(m, ID_OPEN, FALSE);
@@ -251,6 +329,11 @@ void trayMenu() {
   DestroyMenu(m);
   if (cmd == ID_OPEN) showWindow();
   else if (cmd == ID_AUTOSTART) setAutostart(!autostartOn());
+  else if (cmd == ID_UPDATECHECK) {
+    bool on = !g.cfg->updateCheck();
+    g.cfg->setUpdateCheck(on);
+    update::checkNow();
+  } else if (cmd == ID_UPDATE) runUpdate();
   else if (cmd == ID_QUIT) quit();
 }
 
@@ -263,6 +346,7 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
       refreshStatus();
       refreshPlugins();
+      refreshUpdate();
       return 0;
     case WM_COMMAND:
       switch (LOWORD(wp)) {
@@ -274,6 +358,7 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
           if (HIWORD(wp) == BN_CLICKED) setAutostart(SendMessageW(g.autostart, BM_GETCHECK, 0, 0) == BST_CHECKED);
           break;
         case ID_HIDE: hideToTray(); break;
+        case ID_UPDATE: runUpdate(); break;
       }
       return 0;
     case WM_SIZE:
@@ -338,7 +423,7 @@ void createWindow() {
   wc.lpszClassName = kClass;
   RegisterClassExW(&wc);
 
-  const int W = 460, H = 350, M = 16, inner = W - 2 * M;
+  const int W = 460, H = kBaseH, M = 16, inner = W - 2 * M;
   DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
   RECT r{0, 0, px(W), px(H)};
   AdjustWindowRectEx(&r, style, FALSE, 0);
@@ -357,6 +442,10 @@ void createWindow() {
   add(L"BUTTON", s.forget, BS_PUSHBUTTON | WS_TABSTOP, M + 188, 264, 220, 30, ID_FORGET, g.font);
   g.autostart = add(L"BUTTON", s.autostart, BS_AUTOCHECKBOX | WS_TABSTOP, M, 308, 280, 24, ID_AUTOSTART, g.font);
   add(L"BUTTON", s.hide, BS_DEFPUSHBUTTON | WS_TABSTOP, M + inner - 110, 305, 110, 30, ID_HIDE, g.font);
+  g.updText = add(L"STATIC", L"", SS_NOPREFIX | SS_CENTERIMAGE, M, 346, inner - 170, 30, 0, g.bold);
+  g.updButton = add(L"BUTTON", s.updButton, BS_PUSHBUTTON | WS_TABSTOP, M + inner - 160, 346, 160, 30, ID_UPDATE, g.font);
+  ShowWindow(g.updText, SW_HIDE);
+  ShowWindow(g.updButton, SW_HIDE);
 }
 }  // namespace
 

@@ -24,6 +24,9 @@ if(NODE)
     COMMAND ${NODE} --test ${CMAKE_CURRENT_SOURCE_DIR}/protocol.test.js)
   set_tests_properties(protocol PROPERTIES ENVIRONMENT
     "OROS_BRIDGE=$<TARGET_FILE:oros-bridge>;OROS_TEST_PLUGINS=${CMAKE_BINARY_DIR}/testplugins;OROS_TEST_AUDIO_MODULE=$<TARGET_FILE:oros_test_audio_module>")
+  add_test(NAME update
+    COMMAND ${NODE} --test ${CMAKE_CURRENT_SOURCE_DIR}/update.test.js)
+  set_tests_properties(update PROPERTIES ENVIRONMENT "OROS_BRIDGE=$<TARGET_FILE:oros-bridge>")
   if(TARGET oros_test_asio)   # asio/ (Windows): the loopback ASIO driver, registered by the test
     set_property(TEST protocol APPEND PROPERTY ENVIRONMENT "OROS_TEST_ASIO_DRIVER=$<TARGET_FILE:oros_test_asio>")
   endif()

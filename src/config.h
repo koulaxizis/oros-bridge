@@ -40,7 +40,10 @@ public:
 
   std::vector<PluginInfo> plugins();
   void setPlugins(const std::vector<PluginInfo>& p, const nlohmann::json& stamps);
-  nlohmann::json stamps();                  // path -> modification time when scanned
+  nlohmann::json stamps();
+  // "Tell me about new versions" (0.8.0), on unless the person turned it off
+  bool updateCheck();
+  void setUpdateCheck(bool on);                  // path -> modification time when scanned
   const PluginInfo* find(const std::string& id, PluginInfo& out);
 
   static std::string defaultDir();
