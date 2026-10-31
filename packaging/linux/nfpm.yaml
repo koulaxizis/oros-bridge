@@ -1,0 +1,40 @@
+# orOS Bridge as .deb and .rpm (nfpm). release.yml sets VERSION and runs
+#   nfpm package -f packaging/linux/nfpm.yaml -p deb|rpm -t out/
+# from the repo root after the build. GTK 3 and the AppIndicator are only
+# recommended: without them the bridge still runs, as a terminal program.
+name: oros-bridge
+arch: amd64
+platform: linux
+version: ${VERSION}
+section: sound
+priority: optional
+maintainer: Christos Koulaxizis <koulaxizis@glarolykoi.net>
+description: |
+  orOS Bridge lets orOS Studio (useoros.online) use your own VST3 and CLAP
+  plugins and record through your sound card (JACK, PipeWire, PulseAudio,
+  ALSA). It listens on 127.0.0.1 only.
+vendor: orOS
+homepage: https://useoros.online
+license: MIT
+contents:
+  - src: build/oros-bridge
+    dst: /usr/bin/oros-bridge
+    file_info:
+      mode: 0755
+  - src: packaging/linux/oros-bridge.desktop
+    dst: /usr/share/applications/oros-bridge.desktop
+  - src: res/oros-bridge.png
+    dst: /usr/share/icons/hicolor/256x256/apps/oros-bridge.png
+  - src: README.md
+    dst: /usr/share/doc/oros-bridge/README.md
+  - src: LICENSE
+    dst: /usr/share/doc/oros-bridge/LICENSE
+  - src: THIRD_PARTY.md
+    dst: /usr/share/doc/oros-bridge/THIRD_PARTY.md
+overrides:
+  deb:
+    depends: [libc6, libstdc++6]
+    recommends: [libgtk-3-0, libayatana-appindicator3-1, libx11-6]
+  rpm:
+    depends: [glibc, libstdc++]
+    recommends: [gtk3, libayatana-appindicator-gtk3, libX11]

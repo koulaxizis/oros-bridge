@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=orOS Bridge
+Comment=Your own VST3 and CLAP plugins and your sound card for orOS Studio
+Comment[el]=Τα δικά σου plugins VST3 και CLAP και η κάρτα ήχου σου για το orOS Studio
+Exec=oros-bridge
+Icon=oros-bridge
+Terminal=false
+Categories=AudioVideo;Audio;
+Keywords=orOS;Studio;VST3;CLAP;JACK;PipeWire;audio;
+StartupWMClass=oros-bridge

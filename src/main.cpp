@@ -21,8 +21,8 @@ using namespace ob;
 static const char* kUsage =
     "orOS Bridge " OROS_BRIDGE_VERSION "\n"
     "Lets orOS Studio use the VST3 and CLAP plugins on this computer.\n\n"
-    "  oros-bridge                 run; on Windows in its own window and the tray\n"
-    "  --tray                      start hidden in the tray (Windows)\n"
+    "  oros-bridge                 run in its own window and the tray (Windows; Linux with a desktop)\n"
+    "  --tray                      start hidden in the tray\n"
     "  --console                   run in the console instead of a window\n"
     "  --port N                    listen on 127.0.0.1:N (default 47621)\n"
     "  --allow-origin URL          also accept pages from URL (repeatable)\n"
