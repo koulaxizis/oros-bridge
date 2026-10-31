@@ -68,7 +68,7 @@ native code, so a separate program hosts them and Studio talks to it.
    plus one input period); the card's own converters are not known, so
    Studio adds the person's recording offset.
 
-10. **ASIO as a separate GPLv3 module (0.4.0).** The ASIO SDK is GPLv3 or
+10. **ASIO® as a separate GPLv3 module (0.4.0).** The ASIO SDK is GPLv3 or
    proprietary (since 2025-10), so it lives in its own library,
    `oros-bridge-asio.dll` (`asio/`, GPLv3, ASIO SDK 2.3.4 fetched at build
    time), and the bridge stays MIT. The whole boundary is the plain C header
@@ -86,7 +86,14 @@ native code, so a separate program hosts them and Studio talks to it.
    same card name is required for both, and the buffer size is the one in the
    driver's control panel. `latency` is the input plus output latency the
    driver reports. While a card is open, listing returns the last list
-   instead of loading other drivers.
+   instead of loading other drivers. Wherever ASIO is named (this repo's
+   docs, the release notes, Studio's sound card settings, the download
+   page), the ASIO Compatible Logo (`asio/logo/`) is shown with "ASIO is a
+   registered trademark of Steinberg Media Technologies GmbH.", as the SDK's
+   usage guidelines ask (decision 2026-10-31).
+
+   <img src="asio/logo/asio-compatible-bw.svg" alt="ASIO Compatible" height="72">
+
 
 ## Protocol (WebSocket, `ws://127.0.0.1:47621/`)
 

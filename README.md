@@ -37,6 +37,8 @@ monitor).
 
 ### ASIO® (0.4.0, Windows)
 
+<img src="asio/logo/asio-compatible-bw.svg" alt="ASIO Compatible" height="72">
+
 If your card has an ASIO driver, put `oros-bridge-asio.dll` next to
 `oros-bridge.exe` (the Windows zip has both) and choose `ASIO` in Studio. One
 card both records and plays, at the buffer size set in the driver's own

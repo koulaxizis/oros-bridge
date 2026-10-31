@@ -9,7 +9,9 @@ Fetched at build time by CMake, pinned to a release, all MIT or more open:
 | [JSON for Modern C++](https://github.com/nlohmann/json) (Niels Lohmann) | 3.11.3 | MIT | the protocol's JSON |
 | [miniaudio](https://github.com/mackron/miniaudio) (David Reid) | 0.11.25 | public domain (Unlicense) or MIT No Attribution | the sound card: WASAPI, JACK, PulseAudio/PipeWire, ALSA |
 
-## The ASIO module (`oros-bridge-asio.dll`, Windows, GPLv3)
+## The ASIO® module (`oros-bridge-asio.dll`, Windows, GPLv3)
+
+<img src="asio/logo/asio-compatible-bw.svg" alt="ASIO Compatible" height="72">
 
 | Library | Version | Licence | Use |
 |---|---|---|---|
@@ -18,6 +20,8 @@ Fetched at build time by CMake, pinned to a release, all MIT or more open:
 It is a separate library under the GPLv3 ([asio/LICENSE](asio/LICENSE)),
 loaded by the bridge only when it lies beside the exe, and also uses JSON for
 Modern C++ (MIT). The bridge itself stays MIT and contains no ASIO SDK code.
+The ASIO Compatible Logo in [asio/logo/](asio/logo/) is Steinberg's, unaltered,
+shown as the SDK's usage guidelines ask wherever ASIO is named.
 ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 
 VST is a registered trademark of Steinberg Media Technologies GmbH. orOS Bridge
