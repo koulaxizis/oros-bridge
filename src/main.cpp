@@ -80,6 +80,9 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
   bool gui = !console && !scanOnly && !forget && unknown.empty();
   if (!gui) useConsole();
+#elif defined(__linux__)
+  // a window when there is a desktop with GTK 3; a terminal program otherwise (and with --console)
+  bool gui = !console && !scanOnly && !forget && !help && unknown.empty() && guiAvailable();
 #else
   const bool gui = false;
   (void)tray;

@@ -4,6 +4,7 @@
 #include "mainloop.h"
 
 namespace ob {
+bool guiAvailable() { return false; }
 bool guiAlreadyRunning() { return false; }
 void guiPairingCode(const std::string&) {}
 int guiRun(Config&, Server&, Pairing&, bool) {
