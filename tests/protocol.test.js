@@ -464,7 +464,7 @@ test("ASIO: the loopback driver is listed, a take lines up with what was played"
   if (!reg(["add", ASIO_KEY, "/v", "CLSID", "/d", ASIO_CLSID, "/f"])) { t.skip("not an administrator"); return; }
   t.after(() => { reg(["delete", ASIO_KEY, "/f"]); reg(["delete", COM_KEY, "/f"]); });
   assert.ok(reg(["add", ASIO_KEY, "/v", "Description", "/d", "orOS Test ASIO", "/f"]));
-  assert.ok(reg(["add", COM_KEY + "\\InprocServer32", "/ve", "/d", ASIO_DRIVER, "/f"]));
+  assert.ok(reg(["add", COM_KEY + "\\InprocServer32", "/ve", "/d", path.resolve(ASIO_DRIVER), "/f"]));
   assert.ok(reg(["add", COM_KEY + "\\InprocServer32", "/v", "ThreadingModel", "/d", "Apartment", "/f"]));
   const c = await paired();
   const r = await c.cmd({ op: "audioDevices" });

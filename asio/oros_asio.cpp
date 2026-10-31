@@ -231,8 +231,11 @@ long onMessage(long selector, long value, void*, double*) {
 }
 
 // ---------- drivers ----------
+// read again from the registry each time (only while no driver is loaded), so a
+// driver installed while the bridge runs shows up
 std::vector<std::string> driverNames() {
-  if (!asioDrivers) asioDrivers = new AsioDrivers();
+  delete asioDrivers;
+  asioDrivers = new AsioDrivers();
   std::vector<std::string> out;
   constexpr long kMax = 64;
   std::vector<std::vector<char>> store(kMax, std::vector<char>(64, 0));
