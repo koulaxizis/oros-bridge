@@ -5,6 +5,7 @@
 #include <cstring>
 #include <iostream>
 #include <thread>
+#include "audio.h"
 #include "config.h"
 #include "gui.h"
 #include "mainloop.h"
@@ -26,7 +27,8 @@ static const char* kUsage =
     "  --allow-origin URL          also accept pages from URL (repeatable)\n"
     "  --config-dir DIR            keep settings in DIR\n"
     "  --scan                      look for plugins, print them, exit\n"
-    "  --forget-pairings           forget every paired browser, exit\n";
+    "  --forget-pairings           forget every paired browser, exit\n"
+    "  --test-audio                also offer a loopback sound card (tests)\n";
 
 #ifdef _WIN32
 // The program is built as a window program, so it has no console of its own.
@@ -65,6 +67,7 @@ int main(int argc, char** argv) {
     else if (a == "--forget-pairings") forget = true;
     else if (a == "--console") console = true;
     else if (a == "--tray") tray = true;
+    else if (a == "--test-audio") enableTestAudio();
     else if (a == "--help" || a == "-h") { console = true; help = true; }
     else { unknown = a; break; }
   }

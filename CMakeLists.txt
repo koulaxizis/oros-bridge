@@ -1,7 +1,7 @@
 # orOS Bridge: hosts the person's own VST3 and CLAP plugins for orOS Studio,
 # on this computer only (127.0.0.1). See DESIGN.md.
 cmake_minimum_required(VERSION 3.28)
-project(oros_bridge VERSION 0.2.0 LANGUAGES C CXX)
+project(oros_bridge VERSION 0.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -37,7 +37,25 @@ FetchContent_Declare(vst3sdk
 FetchContent_Declare(json
   URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
   URL_HASH SHA256=d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d)
-FetchContent_MakeAvailable(clap json vst3sdk)
+# miniaudio 0.11.25 (public domain or MIT-0): the sound card
+FetchContent_Declare(miniaudio
+  GIT_REPOSITORY https://github.com/mackron/miniaudio.git
+  GIT_TAG 0.11.25
+  GIT_SHALLOW TRUE
+  SOURCE_SUBDIR none)   # not its own CMake (examples, tests): we build miniaudio.c below
+FetchContent_MakeAvailable(clap json vst3sdk miniaudio)
+
+# only playback and capture, only the backends Studio offers; every system
+# library is loaded at run time, so a missing JACK or PulseAudio hides one backend
+add_library(oros_miniaudio STATIC ${miniaudio_SOURCE_DIR}/miniaudio.c)
+target_include_directories(oros_miniaudio SYSTEM PUBLIC ${miniaudio_SOURCE_DIR})
+target_compile_definitions(oros_miniaudio PUBLIC
+  MA_NO_DECODING MA_NO_ENCODING MA_NO_GENERATION MA_NO_RESOURCE_MANAGER MA_NO_NODE_GRAPH MA_NO_ENGINE
+  MA_ENABLE_ONLY_SPECIFIC_BACKENDS MA_ENABLE_WASAPI MA_ENABLE_JACK MA_ENABLE_PULSEAUDIO MA_ENABLE_ALSA MA_ENABLE_COREAUDIO)
+if(NOT WIN32)
+  find_package(Threads REQUIRED)
+  target_link_libraries(oros_miniaudio PUBLIC Threads::Threads ${CMAKE_DL_LIBS} m)
+endif()
 
 add_library(bridge_core STATIC
   src/base64.cpp
@@ -50,6 +68,8 @@ add_library(bridge_core STATIC
   src/clap_host.cpp
   src/vst3_host.cpp
   src/editor.cpp
+  src/audio.cpp
+  src/audio_ma.cpp
 )
 # the SDK's hosting library leaves these to the host
 set(VST3_SRC ${vst3sdk_SOURCE_DIR})
@@ -64,7 +84,7 @@ else()
   target_sources(bridge_core PRIVATE ${VST3_SRC}/public.sdk/source/vst/hosting/module_linux.cpp)
 endif()
 target_include_directories(bridge_core PUBLIC src)
-target_link_libraries(bridge_core PUBLIC clap nlohmann_json::nlohmann_json sdk_hosting)
+target_link_libraries(bridge_core PUBLIC clap nlohmann_json::nlohmann_json sdk_hosting oros_miniaudio)
 target_compile_definitions(bridge_core PUBLIC OROS_BRIDGE_VERSION="${PROJECT_VERSION}")
 if(WIN32)
   target_link_libraries(bridge_core PUBLIC ws2_32 bcrypt shell32 ole32 user32)

@@ -50,6 +50,26 @@ native code, so a separate program hosts them and Studio talks to it.
    `--forget-pairings` and `--help` write to the console they were started
    from. Other systems have no window (`src/gui_none.cpp`).
 
+9. **The sound card (0.3.0).** Studio in a browser hears and records
+   through the system's shared mixer (WASAPI shared mode, PulseAudio): no
+   exclusive mode, no JACK, one stereo input. The bridge can open the card
+   itself (`src/audio.h`): WASAPI (shared or exclusive) on Windows; JACK,
+   PipeWire/PulseAudio and ALSA on Linux, through miniaudio 0.11.25 (public
+   domain or MIT-0), which loads each system library at run time, so a
+   missing JACK only hides that backend. A take never streams in real time
+   from the page: Studio renders the song from the playhead first and sends
+   it ahead (`audioPlay` + `ORP1` blocks), then `audioStart` plays it from
+   frame 0 and records the chosen inputs **in the same callback**, so a
+   recorded frame and the frame played with it share the card's clock (no
+   drift, no gaps from a busy page). The callback only copies into a ring;
+   a writer thread empties it into a temporary file, read back with
+   `takeRead` after `audioStop` and deleted on `audioClose` or when the page
+   goes. `latency` is the bridge's estimate of the round trip (output buffer
+   plus one input period); the card's own converters are not known, so
+   Studio adds the person's recording offset. ASIO comes as a separate
+   GPLv3 module (decision 2026-10-31: the ASIO SDK is GPLv3 or proprietary),
+   which adds one more backend and leaves this program MIT.
+
 ## Protocol (WebSocket, `ws://127.0.0.1:47621/`)
 
 Text messages are JSON. A command carries `op` and an optional `id`; the
@@ -70,9 +90,24 @@ answer repeats the `id` and has `ok` (and `error` when false). Events have
 | `reset` | `h` | the plugin forgets its sound (a new render) |
 | `editor` / `closeEditor` | `h` | the plugin's window; event `editorClosed` {h} when the person closes it |
 | `close` | `h` | |
+| `audioDevices` | | `backends`: [{id, label, exclusive, ok, inputs, outputs \| error}], each device {name, channels, default} |
+| `audioOpen` | `backend`, `input`?, `output`? (names, "" = default), `sr`? (0 = the card's), `period`? (16..8192), `exclusive`?, `record`: [input channel, from 0] | `sr`, `period`, `inputs`, `outputs`, `latency`, `record`; events `levels` every 100 ms |
+| `audioPlay` | `frames`, `channels` (0..2), `out` (first output channel) | then `ORP1` blocks fill it |
+| `audioStart` / `audioStop` | | stop: `frames` recorded, `lost` (frames the disk could not keep up with) |
+| `takeRead` | `offset`, `frames` (at most 262144) | an `ORT1` block, then `frames` |
+| `audioClose` | | |
 
 Events: `hello` {app, version, editors} on connect, `scanning`,
-`editorClosed`, `renderError` {h, seq, error}.
+`editorClosed`, `renderError` {h, seq, error}, `levels` {peaks (one per
+input channel), running, pos}, `audioError` {offset, error} for a bad
+`ORP1` block.
+
+Sound to play and takes are binary too:
+
+```
+"ORP1" | u32 offset | u32 frames | u16 channels | u16 0 | channels × frames × float32
+"ORT1" | u32 offset | u32 frames | u16 channels | u16 0 | channels × frames × float32
+```
 
 A block to render is a binary message, little endian:
 
@@ -94,4 +129,8 @@ finish.
 (`tests/test_plugins.c`: a CLAP gain with 32 frames of latency and a CLAP
 sine instrument; `tests/vst3_test_gain.cpp`: a VST 3 gain) and checks the
 origin and host rules, pairing, scanning, rendering (exact samples, notes at
-their frame), state in both formats and bad requests.
+their frame), state in both formats and bad requests. With `--test-audio`
+the bridge also offers a loopback card (4 inputs, 2 outputs, every output
+back on an input 333 frames later, in real time), and the test checks that a
+take lines up with what was played sample for sample, the take blocks, the
+meters, a second take and bad requests. Real cards are tested by hand.

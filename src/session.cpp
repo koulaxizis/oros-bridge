@@ -1,4 +1,5 @@
 #include "session.h"
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <thread>
@@ -16,6 +17,12 @@ Session::Session(Connection& conn, Config& cfg, Pairing& pairing) : conn_(conn),
 }
 
 Session::~Session() {
+  meterQuit_ = true;
+  if (meterThread_.joinable()) meterThread_.join();
+  {
+    std::lock_guard<std::mutex> g(audioMu_);
+    audio_.close();
+  }
   auto all = std::move(open_);
   MainLoop::get().call([&all] {
     for (auto& kv : all) {
@@ -100,6 +107,9 @@ nlohmann::json Session::command(const nlohmann::json& m) {
     return {{"ok", true}};
   }
 
+  // ----- the sound card -----
+  if (op.rfind("audio", 0) == 0 || op == "takeRead") return audioCommand(op, m);
+
   // ----- open plugins -----
   if (op == "open") {
     if (open_.size() >= kMaxOpen) return fail("too many open plugins");
@@ -175,6 +185,115 @@ nlohmann::json Session::command(const nlohmann::json& m) {
   return fail("unknown op");
 }
 
+// The sound card: list, open with the inputs to record, the sound to play
+// (sent ahead in "ORP1" blocks), start, stop, read the take back.
+nlohmann::json Session::audioCommand(const std::string& op, const nlohmann::json& m) {
+  if (op == "audioDevices") {
+    auto list = nlohmann::json::array();
+    for (auto* b : audioBackends()) {
+      nlohmann::json d, e = {{"id", b->id()}, {"label", b->label()}, {"exclusive", b->canExclusive()}};
+      std::string err;
+      if (b->devices(d, err)) { e["ok"] = true; e["inputs"] = d["inputs"]; e["outputs"] = d["outputs"]; }
+      else { e["ok"] = false; e["error"] = err; }
+      list.push_back(e);
+    }
+    return {{"ok", true}, {"backends", list}};
+  }
+  std::lock_guard<std::mutex> g(audioMu_);
+  if (op == "audioOpen") {
+    auto* b = findAudioBackend(m.value("backend", ""));
+    if (!b) return fail("unknown backend");
+    StreamSpec spec;
+    spec.input = m.value("input", "");
+    spec.output = m.value("output", "");
+    spec.sampleRate = m.value("sr", 0u);
+    spec.period = m.value("period", 256u);
+    spec.exclusive = m.value("exclusive", false);
+    if ((spec.sampleRate && (spec.sampleRate < 8000 || spec.sampleRate > 384000)) || spec.period < 16 || spec.period > 8192)
+      return fail("bad sample rate or period");
+    std::vector<uint32_t> rec;
+    if (m.contains("record")) {
+      if (!m["record"].is_array() || m["record"].size() > kMaxRecordChannels) return fail("bad inputs");
+      for (auto& x : m["record"]) {
+        if (!x.is_number_unsigned() || x.get<uint32_t>() >= 1024) return fail("bad inputs");
+        rec.push_back(x.get<uint32_t>());
+      }
+    }
+    std::string err;
+    if (!audio_.open(*b, spec, rec, err)) return fail(err);
+    if (!meterThread_.joinable()) meterThread_ = std::thread([this] { meters(); });
+    auto& s = audio_.stream();
+    return {{"ok", true}, {"sr", s.sampleRate}, {"period", s.period}, {"inputs", s.inChannels},
+            {"outputs", s.outChannels}, {"latency", s.latency}, {"record", rec}};
+  }
+  if (op == "audioClose") {
+    audio_.close();
+    return {{"ok", true}};
+  }
+  if (!audio_.isOpen()) return fail("no sound card open");
+  std::string err;
+  if (op == "audioPlay") {
+    if (!audio_.prepare(m.value("frames", 0u), m.value("channels", 0u), m.value("out", 0u), err)) return fail(err);
+    return {{"ok", true}};
+  }
+  if (op == "audioStart") {
+    if (!audio_.start(err)) return fail(err);
+    return {{"ok", true}};
+  }
+  if (op == "audioStop") {
+    uint64_t frames = 0, lost = 0;
+    if (!audio_.stop(frames, lost, err)) return fail(err);
+    return {{"ok", true}, {"frames", frames}, {"lost", lost}};
+  }
+  if (op == "takeRead") {
+    uint64_t offset = m.value("offset", uint64_t(0));
+    uint32_t frames = std::min<uint32_t>(m.value("frames", 65536u), 1u << 18);
+    std::vector<float> planar;
+    uint32_t got = 0;
+    if (!audio_.readTake(offset, frames, planar, got, err)) return fail(err);
+    // "ORT1" | u32 offset | u32 frames | u16 channels | u16 0 | planar float32
+    uint32_t nch = uint32_t(audio_.recordChannels().size());
+    std::vector<uint8_t> out(16 + planar.size() * 4);
+    std::memcpy(out.data(), "ORT1", 4);
+    for (int i = 0; i < 4; i++) { out[4 + i] = uint8_t(uint32_t(offset) >> (8 * i)); out[8 + i] = uint8_t(got >> (8 * i)); }
+    out[12] = uint8_t(nch);
+    out[13] = uint8_t(nch >> 8);
+    if (!planar.empty()) std::memcpy(out.data() + 16, planar.data(), planar.size() * 4);
+    conn_.sendBinary(out);
+    return {{"ok", true}, {"frames", got}};
+  }
+  return fail("unknown op");
+}
+
+// Every 100 ms while a card is open: the loudest sample of each input and
+// where the take is, so Studio can show meters before and during a take.
+void Session::meters() {
+  while (!meterQuit_) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    nlohmann::json ev;
+    {
+      std::lock_guard<std::mutex> g(audioMu_);
+      if (!audio_.isOpen()) continue;
+      ev = {{"event", "levels"}, {"peaks", audio_.takePeaks()}, {"running", audio_.running()}, {"pos", audio_.position()}};
+    }
+    conn_.sendText(ev.dump());
+  }
+}
+
+// Sound to play: "ORP1" | u32 offset | u32 frames | u16 channels | u16 0 | planar float32
+void Session::playBlock(const std::vector<uint8_t>& d) {
+  auto u32 = [&](size_t at) { return uint32_t(d[at]) | uint32_t(d[at + 1]) << 8 | uint32_t(d[at + 2]) << 16 | uint32_t(d[at + 3]) << 24; };
+  uint32_t offset = u32(4), frames = u32(8), nch = uint32_t(d[12]) | uint32_t(d[13]) << 8;
+  std::string err;
+  if (d.size() != 16 + size_t(nch) * frames * 4) err = "bad block size";
+  else {
+    std::lock_guard<std::mutex> g(audioMu_);
+    if (!audio_.isOpen()) err = "no sound card open";
+    else audio_.fill(offset, frames, nch, d.data() + 16, err);
+  }
+  if (!err.empty()) conn_.sendText(nlohmann::json{{"event", "audioError"}, {"offset", offset}, {"error", err}}.dump());
+}
+
 // A block to render: "ORB1", u32 handle, u32 seq, u32 frames, u16 channels,
 // u16 events, events (u32 frame, status, data1, data2, 0), float32 planar.
 // The answer has the same header with the output channels and no events.
@@ -185,6 +304,7 @@ void Session::onBinary(const std::vector<uint8_t>& d) {
     conn_.sendText(nlohmann::json{{"event", "renderError"}, {"h", h}, {"seq", seq}, {"error", e}}.dump());
   };
   if (!authed_) { error(0, 0, "not paired"); return; }
+  if (d.size() >= 16 && std::memcmp(d.data(), "ORP1", 4) == 0) { playBlock(d); return; }
   if (d.size() < 20 || std::memcmp(d.data(), "ORB1", 4) != 0) { error(0, 0, "bad block"); return; }
   uint32_t h = u32(4), seq = u32(8), frames = u32(12), nch = u16(16), nev = u16(18);
   auto it = open_.find(int(h));

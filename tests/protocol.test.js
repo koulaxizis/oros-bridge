@@ -24,7 +24,7 @@ test.before(async () => {
   assert.ok(BRIDGE && PLUGINS, "set OROS_BRIDGE and OROS_TEST_PLUGINS");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "oros-bridge-"));
   fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify({ folders: [PLUGINS] }));
-  proc = spawn(BRIDGE, ["--console", "--port", "0", "--config-dir", dir, "--allow-origin", ORIGIN], { stdio: ["ignore", "pipe", "inherit"] });
+  proc = spawn(BRIDGE, ["--console", "--port", "0", "--config-dir", dir, "--allow-origin", ORIGIN, "--test-audio"], { stdio: ["ignore", "pipe", "inherit"] });
   await new Promise((res, rej) => {
     proc.on("exit", (c) => rej(new Error("bridge exited " + c)));
     proc.stdout.on("data", (d) => {
@@ -140,6 +140,17 @@ class Client {
         return res;
       }
       if (m.event === "renderError") return m;
+    }
+  }
+  // the next binary message (a take block) and the answer to `o`
+  async take(o) {
+    const id = (this.id = (this.id || 0) + 1);
+    this.send(JSON.stringify(Object.assign({ id, op: "takeRead" }, o)), 1);
+    let bin = null;
+    for (;;) {
+      const m = await this.next();
+      if (Buffer.isBuffer(m)) bin = m;
+      else if (m && m.id === id) return { r: m, bin };
     }
   }
   close() { this.s.destroy(); }
@@ -301,4 +312,96 @@ test("bad requests are refused, the connection lives on", async () => {
   const again = await c.render(o.h, [ramp(64)], 64);
   assert.equal(again.length, 2);
   c.close();
+});
+
+// ---- the sound card (the loopback card of --test-audio) ----
+// input 1/2 = output 1/2 333 frames later, input 3/4 the same at half level
+function playBlock(offset, chans) {
+  const frames = chans[0].length, b = Buffer.alloc(16 + chans.length * frames * 4);
+  b.write("ORP1", 0);
+  b.writeUInt32LE(offset, 4); b.writeUInt32LE(frames, 8); b.writeUInt16LE(chans.length, 12);
+  chans.forEach((ch, c) => ch.forEach((v, i) => b.writeFloatLE(v, 16 + (c * frames + i) * 4)));
+  return b;
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test("sound card: the backends, the loopback card listed first", async () => {
+  const c = await paired();
+  const r = await c.cmd({ op: "audioDevices" });
+  assert.equal(r.ok, true);
+  assert.equal(r.backends[0].id, "test");
+  assert.deepEqual(r.backends[0].inputs, [{ name: "Loopback", channels: 4, default: true }]);
+  const ids = r.backends.map((b) => b.id);
+  if (IS_WIN) assert.ok(ids.includes("wasapi"));
+  else if (process.platform === "linux") for (const id of ["jack", "pulse", "alsa"]) assert.ok(ids.includes(id), id);
+  for (const b of r.backends) assert.ok(b.ok === true || typeof b.error === "string", b.id);
+  c.close();
+});
+
+test("sound card: a take lines up with what was played, sample for sample", async () => {
+  const c = await paired();
+  assert.equal((await c.cmd({ op: "audioStart" })).error, "no sound card open");
+  const o = await c.cmd({ op: "audioOpen", backend: "test", sr: 48000, period: 128, record: [0, 3] });
+  assert.equal(o.ok, true, o.error);
+  assert.deepEqual([o.sr, o.inputs, o.outputs, o.latency], [48000, 4, 2, 333]);
+  const N = 12000, L = ramp(N), R = ramp(N, -0.5);
+  assert.equal((await c.cmd({ op: "audioPlay", frames: N, channels: 2, out: 0 })).ok, true);
+  c.send(playBlock(0, [L.slice(0, 5000), R.slice(0, 5000)]), 2);
+  c.send(playBlock(5000, [L.slice(5000), R.slice(5000)]), 2);
+  assert.equal((await c.cmd({ op: "audioStart" })).ok, true);
+  assert.equal((await c.cmd({ op: "audioPlay", frames: 10, channels: 1 })).error, "playing");
+  await sleep(500);   // 24000 frames
+  const s = await c.cmd({ op: "audioStop" });
+  assert.equal(s.ok, true, s.error);
+  assert.equal(s.lost, 0);
+  assert.ok(s.frames >= 20000, "recorded " + s.frames);
+  const { r, bin } = await c.take({ offset: 0, frames: 20000 });
+  assert.equal(r.frames, 20000);
+  assert.equal(bin.slice(0, 4).toString(), "ORT1");
+  assert.equal(bin.readUInt32LE(8), 20000);
+  assert.equal(bin.readUInt16LE(12), 2);
+  const at = (ch, i) => bin.readFloatLE(16 + (ch * 20000 + i) * 4);
+  for (let i = 0; i < 333; i++) assert.equal(at(0, i), 0);
+  for (let i = 0; i < N; i++) {
+    assert.equal(at(0, 333 + i), L[i], "input 1 at " + i);
+    assert.equal(at(1, 333 + i), Math.fround(R[i] * 0.5), "input 4 at " + i);
+  }
+  for (let i = 333 + N; i < 20000; i++) assert.equal(at(0, i), 0, "silence after the end");
+  // a read past the end gives what is left
+  const tail = await c.take({ offset: s.frames - 10, frames: 100 });
+  assert.equal(tail.r.frames, 10);
+  // levels come while the card is open
+  let lv;
+  for (;;) { const m = await c.next(); if (m && m.event === "levels") { lv = m; break; } }
+  assert.equal(lv.peaks.length, 4);
+  assert.equal(lv.running, false);
+  // a second take starts over
+  assert.equal((await c.cmd({ op: "audioStart" })).ok, true);
+  await sleep(150);
+  const s2 = await c.cmd({ op: "audioStop" });
+  assert.ok(s2.frames > 0 && s2.frames < s.frames);
+  assert.equal((await c.cmd({ op: "audioClose" })).ok, true);
+  assert.equal((await c.cmd({ op: "takeRead", offset: 0, frames: 10 })).error, "no sound card open");
+  c.close();
+});
+
+test("sound card: bad requests are refused", async () => {
+  const c = await paired();
+  assert.equal((await c.cmd({ op: "audioOpen", backend: "nope" })).error, "unknown backend");
+  assert.equal((await c.cmd({ op: "audioOpen", backend: "test", input: "Other" })).ok, false);
+  assert.match((await c.cmd({ op: "audioOpen", backend: "test", record: [4] })).error, /no input 5/);
+  assert.equal((await c.cmd({ op: "audioOpen", backend: "test", record: "x" })).error, "bad inputs");
+  assert.equal((await c.cmd({ op: "audioOpen", backend: "test", period: 4 })).ok, false);
+  assert.equal((await c.cmd({ op: "audioOpen", backend: "test", record: [0] })).ok, true);
+  assert.equal((await c.cmd({ op: "audioPlay", frames: 100, channels: 3 })).error, "bad channels");
+  assert.equal((await c.cmd({ op: "audioPlay", frames: 100, channels: 2 })).ok, true);
+  c.send(playBlock(90, [ramp(20), ramp(20)]), 2);
+  let e;
+  for (;;) { const m = await c.next(); if (m && m.event === "audioError") { e = m; break; } }
+  assert.equal(e.error, "bad block");
+  assert.equal((await c.cmd({ op: "audioStop" })).error, "not playing");
+  c.close();   // closing the page closes the card
+  const c2 = await paired();
+  assert.equal((await c2.cmd({ op: "audioOpen", backend: "test", record: [0] })).ok, true);
+  c2.close();
 });
