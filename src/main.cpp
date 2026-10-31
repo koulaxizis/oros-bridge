@@ -14,6 +14,7 @@
 #include "mainloop.h"
 #include "scan.h"
 #include "server.h"
+#include "update.h"
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -33,7 +34,11 @@ static const char* kUsage =
     "  --forget-pairings           forget every paired browser, exit\n"
     "  --test-audio                also offer a loopback sound card (tests)\n"
     "  --audio-module PATH         also offer the sound system in this library\n"
-    "  --code-file PATH            keep the open pairing code in PATH (removed when none is open)\n";
+    "  --code-file PATH            keep the open pairing code in PATH (removed when none is open)\n"
+    "  --bundled                   started by orOS (Portable, the installers): no window, no console,\n"
+    "                              no updates of its own (orOS updates it)\n"
+    "  --check-update              say whether a newer orOS Bridge is out, exit\n"
+    "  --update                    download, check and install the newest orOS Bridge for this copy, exit\n";
 
 // --code-file (0.7.1): a system without the bridge's window (orOS USB) shows
 // the pairing code itself. The file holds the code and a newline while one is
@@ -73,7 +78,31 @@ static void useConsole() {
 }
 #endif
 
+// --check-update and --update (0.8.0)
+static int updateMain(bool installIt) {
+  std::string err;
+  std::string tag = update::latestTag(err);
+  if (tag.empty()) { std::cerr << "Could not ask for the latest release: " << err << "\n"; return 1; }
+  if (!update::newer(OROS_BRIDGE_VERSION, tag)) {
+    std::cout << "orOS Bridge " OROS_BRIDGE_VERSION " is up to date.\n";
+    return 0;
+  }
+  if (!installIt) {
+    std::cout << "orOS Bridge " << tag.substr(1) << " is available: " << update::releasePage(tag) << "\n";
+    return 0;
+  }
+  std::string detail;
+  if (!update::install(tag, err, detail)) {
+    std::cerr << "The update to " << tag.substr(1) << " did not work (" << err << "): " << detail << "\n";
+    if (err == "manual") std::cerr << "Download it from " << update::releasePage(tag) << "\n";
+    return 1;
+  }
+  std::cout << "orOS Bridge was updated to " << tag.substr(1) << ". Start it again to use it.\n";
+  return 0;
+}
+
 int main(int argc, char** argv) {
+  update::init(argc, argv);
 #ifdef SIGPIPE
   std::signal(SIGPIPE, SIG_IGN);   // a page that went away is a send error, not the end (macOS has no MSG_NOSIGNAL)
 #endif
@@ -81,6 +110,8 @@ int main(int argc, char** argv) {
   opt.origins = {"https://useoros.online", "https://www.useoros.online"};
   std::string dir = Config::defaultDir();
   bool scanOnly = false, forget = false, console = false, tray = false, help = false;
+  bool bundled = false, checkUpdate = false, doUpdate = false;
+  long afterUpdate = 0;
   std::string codeFile;
   std::string unknown;
   for (int i = 1; i < argc; i++) {
@@ -103,21 +134,29 @@ int main(int argc, char** argv) {
     else if (a == "--test-audio") { enableTestAudio(); enableTestMidi(); }
     else if (a == "--audio-module") addAudioModule(next());
     else if (a == "--code-file") codeFile = next();
+    else if (a == "--bundled") { bundled = true; update::setBundled(); }
+    else if (a == "--check-update") checkUpdate = true;
+    else if (a == "--update") doUpdate = true;
+    else if (a == "--after-update") afterUpdate = std::atol(next().c_str());
     else if (a == "--help" || a == "-h") { console = true; help = true; }
     else { unknown = a; break; }
   }
+  bool cli = console || bundled || scanOnly || forget || checkUpdate || doUpdate || !unknown.empty();
 #ifdef _WIN32
-  bool gui = !console && !scanOnly && !forget && unknown.empty();
-  if (!gui) useConsole();
+  bool gui = !cli;
+  if (!gui && !bundled) useConsole();   // bundled: the output goes where orOS sent it
 #elif defined(__linux__)
   // a window when there is a desktop with GTK 3; a terminal program otherwise (and with --console)
-  bool gui = !console && !scanOnly && !forget && !help && unknown.empty() && guiAvailable();
+  bool gui = !cli && !help && guiAvailable();
 #else
   const bool gui = false;
+  (void)cli;
   (void)tray;
 #endif
   if (help) { std::cout << kUsage; return 0; }
   if (!unknown.empty()) { std::cerr << "unknown option " << unknown << "\n" << kUsage; return 2; }
+  if (checkUpdate || doUpdate) return updateMain(doUpdate);
+  if (afterUpdate) update::waitForOld(afterUpdate);   // the bridge that updated us lets go of the port first
   if (gui && guiAlreadyRunning()) return 0;
 
   Config cfg(dir);
@@ -149,7 +188,11 @@ int main(int argc, char** argv) {
             << "Keep this window open while you use orOS Studio.\n" << std::flush;
   std::thread net([&] { server.run(); });
   if (!codeFile.empty()) std::thread(followCode, std::ref(pairing), codeFile).detach();
-  if (gui) return guiRun(cfg, server, pairing, tray);
+  if (gui) {
+    update::cleanOld();
+    update::startChecks(cfg);
+    return guiRun(cfg, server, pairing, tray);
+  }
   // Ctrl+C or closing the window ends the bridge; the system frees the plugins
   std::signal(SIGINT, [](int) { std::_Exit(0); });
   std::signal(SIGTERM, [](int) { std::_Exit(0); });

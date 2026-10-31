@@ -22,6 +22,7 @@
 #include "gui_icon.h"   // kIconPng, made by CMake from res/oros-bridge.png
 #include "mainloop.h"
 #include "scan.h"
+#include "update.h"
 
 namespace ob {
 namespace {
@@ -65,6 +66,7 @@ struct Api {
   void (*gtk_label_set_line_wrap)(W, gboolean);
   void (*gtk_label_set_selectable)(W, gboolean);
   W (*gtk_button_new_with_label)(const char*);
+  void (*gtk_button_set_label)(W, const char*);
   W (*gtk_check_button_new_with_label)(const char*);
   void (*gtk_toggle_button_set_active)(W, gboolean);
   gboolean (*gtk_toggle_button_get_active)(W);
@@ -78,6 +80,7 @@ struct Api {
   W (*gtk_message_dialog_new)(W, int, int, int, const char*, ...);
   W (*gtk_menu_new)();
   W (*gtk_menu_item_new_with_label)(const char*);
+  void (*gtk_menu_item_set_label)(W, const char*);
   W (*gtk_check_menu_item_new_with_label)(const char*);
   void (*gtk_check_menu_item_set_active)(W, gboolean);
   gboolean (*gtk_check_menu_item_get_active)(W);
@@ -108,10 +111,10 @@ struct Api {
     G(gtk_window_set_icon_from_file); G(gtk_window_present); G(gtk_window_iconify); G(gtk_window_set_urgency_hint);
     G(gtk_window_set_wmclass); G(gtk_container_add); G(gtk_container_set_border_width); G(gtk_box_new);
     G(gtk_box_pack_start); G(gtk_box_pack_end); G(gtk_label_new); G(gtk_label_set_text); G(gtk_label_set_markup);
-    G(gtk_label_set_xalign); G(gtk_label_set_line_wrap); G(gtk_label_set_selectable); G(gtk_button_new_with_label);
+    G(gtk_label_set_xalign); G(gtk_label_set_line_wrap); G(gtk_label_set_selectable); G(gtk_button_new_with_label); G(gtk_button_set_label);
     G(gtk_check_button_new_with_label); G(gtk_toggle_button_set_active); G(gtk_toggle_button_get_active);
     G(gtk_widget_set_sensitive); G(gtk_widget_show_all); G(gtk_widget_show); G(gtk_widget_hide); G(gtk_widget_destroy);
-    G(gtk_widget_set_size_request); G(gtk_widget_set_can_focus); G(gtk_message_dialog_new); G(gtk_menu_new); G(gtk_menu_item_new_with_label);
+    G(gtk_widget_set_size_request); G(gtk_widget_set_can_focus); G(gtk_message_dialog_new); G(gtk_menu_new); G(gtk_menu_item_new_with_label); G(gtk_menu_item_set_label);
     G(gtk_check_menu_item_new_with_label); G(gtk_check_menu_item_set_active); G(gtk_check_menu_item_get_active);
     G(gtk_separator_menu_item_new); G(gtk_menu_shell_append);
 #undef G
@@ -153,6 +156,8 @@ void on(W w, const char* signal, F f, gpointer data = nullptr) {
 struct Strings {
   const char *ready, *connected, *pairLabel, *hint, *plugins, *noPlugins, *scanning, *folders, *scan, *forget,
       *autostart, *hide, *minimise, *forgetAsk, *open, *quit, *cannotStart;
+  // 0.8.0: new versions
+  const char *updOut, *updButton, *updPage, *updating, *updCheck, *updTray, *updDownload, *updChecksum, *updInstall, *updFiles;
 };
 const Strings kEn = {
     "Ready. orOS Studio can connect.",
@@ -172,6 +177,16 @@ const Strings kEn = {
     "Open",
     "Quit",
     "orOS Bridge could not start:",
+    "orOS Bridge %s is out.",
+    "Update",
+    "Download page",
+    "Updating to %s…",
+    "Tell me about new versions",
+    "Update to %s",
+    "The update could not be downloaded. Try again later.",
+    "The download did not match its checksum and was not used.",
+    "The update was not installed.",
+    "The program file could not be replaced.",
 };
 const Strings kEl = {
     "Έτοιμο. Το orOS Studio μπορεί να συνδεθεί.",
@@ -191,6 +206,16 @@ const Strings kEl = {
     "Άνοιγμα",
     "Έξοδος",
     "Το orOS Bridge δεν μπόρεσε να ξεκινήσει:",
+    "Κυκλοφόρησε το orOS Bridge %s.",
+    "Ενημέρωση",
+    "Σελίδα λήψης",
+    "Ενημέρωση σε %s…",
+    "Ενημέρωσέ με για νέες εκδόσεις",
+    "Ενημέρωση σε %s",
+    "Η ενημέρωση δεν κατέβηκε. Δοκίμασε ξανά αργότερα.",
+    "Η λήψη δεν ταίριαξε με το checksum της και δεν χρησιμοποιήθηκε.",
+    "Η ενημέρωση δεν εγκαταστάθηκε.",
+    "Το αρχείο του προγράμματος δεν μπόρεσε να αντικατασταθεί.",
 };
 const Strings& strings() {
   for (const char* v : {"LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"}) {
@@ -228,6 +253,8 @@ struct Gui {
   const Strings* s = &kEn;
   W win = nullptr, status = nullptr, pairLabel = nullptr, code = nullptr, plugins = nullptr, folders = nullptr;
   W scan = nullptr, autostart = nullptr, menuAutostart = nullptr;
+  W updRow = nullptr, updText = nullptr, updButton = nullptr, menuUpdate = nullptr, menuUpdateCheck = nullptr;
+  std::string shownUpdate = "-";
   void* indicator = nullptr;
   bool setting = false;   // a toggle changed by us, not by the person
   std::string shownCode = "-", shownPlugins, shownFolders;
@@ -346,6 +373,49 @@ void startScan() {
     });
   }).detach();
 }
+// a newer release: a line and a button under the plugin buttons, an item in the tray menu; nothing pops up
+std::string withVersion(const char* fmt, const std::string& tag) {
+  char buf[256];
+  std::snprintf(buf, sizeof buf, fmt, tag.size() > 1 ? tag.substr(1).c_str() : tag.c_str());
+  return buf;
+}
+void refreshUpdate() {
+  auto u = update::state();
+  std::string text;
+  if (!u.tag.empty()) {
+    if (u.busy) text = withVersion(g.s->updating, u.tag);
+    else if (u.error == "download") text = g.s->updDownload;
+    else if (u.error == "checksum") text = g.s->updChecksum;
+    else if (u.error == "install") text = g.s->updInstall;
+    else if (!u.error.empty()) text = g.s->updFiles;
+    else text = withVersion(g.s->updOut, u.tag);
+  }
+  bool installs = u.canInstall && u.error.empty();
+  std::string key = text + (u.busy ? "|b" : "") + (installs ? "|i" : "");
+  if (key == g.shownUpdate) return;
+  g.shownUpdate = key;
+  a.gtk_label_set_text(g.updText, text.c_str());
+  a.gtk_button_set_label(g.updButton, installs ? g.s->updButton : g.s->updPage);   // otherwise the release page
+  a.gtk_widget_set_sensitive(g.updButton, !u.busy);
+  if (text.empty()) a.gtk_widget_hide(g.updRow);
+  else a.gtk_widget_show(g.updRow);
+  if (g.menuUpdate) {
+    a.gtk_menu_item_set_label(g.menuUpdate, withVersion(g.s->updTray, u.tag).c_str());
+    if (u.tag.empty() || u.busy) a.gtk_widget_hide(g.menuUpdate);
+    else a.gtk_widget_show(g.menuUpdate);
+  }
+}
+void runUpdate() {
+  auto u = update::state();
+  if (u.tag.empty() || u.busy) return;
+  if (!u.canInstall || !u.error.empty()) {
+    update::openPage(update::releasePage(u.tag));
+    return;
+  }
+  update::installAsync([] { quit(); });   // the new bridge has started: this one ends
+  refreshUpdate();
+}
+
 void askForget() {
   // not gtk_dialog_run: a nested loop would stop MainLoop (and every plugin call) until it is answered
   W d = a.gtk_message_dialog_new(g.win, kDialogModal | kDialogDestroyWithParent, kMessageQuestion, kButtonsYesNo, "%s", g.s->forgetAsk);
@@ -400,6 +470,14 @@ void createWindow() {
   a.gtk_box_pack_start(row, forget, 0, 0, 0);
   a.gtk_box_pack_start(box, row, 0, 0, 4);
 
+  g.updRow = a.gtk_box_new(kHorizontal, 8);
+  g.updText = label("", true);
+  g.updButton = a.gtk_button_new_with_label(s.updButton);
+  on(g.updButton, "clicked", +[](W, gpointer) { runUpdate(); });
+  a.gtk_box_pack_start(g.updRow, g.updText, 1, 1, 0);
+  a.gtk_box_pack_end(g.updRow, g.updButton, 0, 0, 0);
+  a.gtk_box_pack_start(box, g.updRow, 0, 0, 0);
+
   W bottom = a.gtk_box_new(kHorizontal, 8);
   g.autostart = a.gtk_check_button_new_with_label(s.autostart);
   on(g.autostart, "toggled", +[](W b, gpointer) {
@@ -415,6 +493,7 @@ void createWindow() {
   a.gtk_box_pack_start(box, bottom, 0, 0, 0);
   a.gtk_widget_show_all(box);
   a.gtk_widget_hide(g.code);
+  a.gtk_widget_hide(g.updRow);
 }
 
 void createTray() {
@@ -424,13 +503,25 @@ void createTray() {
   W open = a.gtk_menu_item_new_with_label(s.open);
   g.menuAutostart = a.gtk_check_menu_item_new_with_label(s.autostart);
   W quitI = a.gtk_menu_item_new_with_label(s.quit);
+  g.menuUpdate = a.gtk_menu_item_new_with_label(s.updButton);
+  on(g.menuUpdate, "activate", +[](W, gpointer) { runUpdate(); });
+  if (!update::bundled()) {
+    g.menuUpdateCheck = a.gtk_check_menu_item_new_with_label(s.updCheck);
+    a.gtk_check_menu_item_set_active(g.menuUpdateCheck, g.cfg->updateCheck());
+    on(g.menuUpdateCheck, "toggled", +[](W m, gpointer) {
+      g.cfg->setUpdateCheck(a.gtk_check_menu_item_get_active(m));
+      update::checkNow();
+    });
+  }
   on(open, "activate", +[](W, gpointer) { showWindow(); });
   on(g.menuAutostart, "toggled", +[](W m, gpointer) {
     if (!g.setting) setAutostart(a.gtk_check_menu_item_get_active(m));
   });
   on(quitI, "activate", +[](W, gpointer) { quit(); });
-  for (W w : {open, g.menuAutostart, a.gtk_separator_menu_item_new(), quitI}) a.gtk_menu_shell_append(menu, w);
+  for (W w : {open, g.menuUpdate, g.menuAutostart, g.menuUpdateCheck, a.gtk_separator_menu_item_new(), quitI})
+    if (w) a.gtk_menu_shell_append(menu, w);
   a.gtk_widget_show_all(menu);
+  a.gtk_widget_hide(g.menuUpdate);
   g.indicator = a.app_indicator_new_with_path("oros-bridge", "oros-bridge", kIndicatorApplicationStatus, g.iconDir.c_str());
   if (!g.indicator) return;
   a.app_indicator_set_title(g.indicator, "orOS Bridge");
@@ -546,6 +637,7 @@ int guiRun(Config& cfg, Server& server, Pairing& pairing, bool hidden) {
   MainLoop::get().addTimer(500, [] {
     refreshStatus();
     refreshPlugins();
+    refreshUpdate();
   });
   if (instanceFd >= 0)
     MainLoop::get().addFd(instanceFd, POLLIN, [](int fd, short) {

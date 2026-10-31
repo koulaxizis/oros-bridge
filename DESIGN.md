@@ -170,6 +170,34 @@ native code, so a separate program hosts them and Studio talks to it.
    ended; the file is removed at start too. orOS USB's System button reads
    it and shows the code over orOS.
 
+15. **New versions, and copies orOS brings (0.8.0).** The window and tray
+   ask GitHub's `releases/latest` a minute after start and then every 24
+   hours (`src/update.cpp`; WinHTTP on Windows, libcurl loaded at run time
+   on Linux with the `curl` or `wget` command as the fallback, so there is
+   no new build dependency). A newer `vX.Y.Z` that is not a draft or a
+   prerelease shows a line and a button in the window and an item in the tray
+   menu, and never pops up (as orOS Drive's notice: free forever, no nagging);
+   `Tell me about new versions` (tray menu, `updateCheck` in config.json)
+   turns the checks off. `Update` downloads the release's `SHA256SUMS.txt` and
+   the files this copy needs and refuses any file whose SHA-256 differs or
+   that the list does not name (our own SHA-256, `src/sha256.cpp`). How the
+   new version takes this copy's place depends on how it was installed
+   (`update::kind()`): Windows renames the running exe (and the ASIO module
+   beside it, so both stay of one version) to `.old` and moves the new ones
+   in, putting the old pair back if a step fails; Linux replaces the
+   AppImage (`$APPIMAGE`) or the program from the tar.gz with a rename in the
+   same folder, or installs the `.deb` (`pkexec apt-get install`) or `.rpm`
+   (`pkexec rpm -U`) when the program is `/usr/bin/oros-bridge` from a
+   package. A folder this user cannot write gets the release page. Then the
+   bridge starts itself again with its options (without `--tray`) and
+   `--after-update <pid>`, which waits for the old one to end before it takes
+   the port. `--bundled` (orOS Portable and the installers start the bridge
+   with it, together with `--code-file`) means no window, no console of its
+   own on Windows and no updates: the product that carries the bridge
+   updates it, as does an `oros-bridge.bundled` file beside the program.
+   `--check-update` and `--update` do the same from a terminal.
+   `OROS_BRIDGE_UPDATE_URL` points every request at a stand-in (tests).
+
 ## Protocol (WebSocket, `ws://127.0.0.1:47621/`)
 
 Text messages are JSON. A command carries `op` and an optional `id`; the
@@ -257,6 +285,12 @@ On Linux CI runs the test a second time under Xvfb: the CLAP test gain then
 has a window (Linux only) that asks the host for a 20 ms timer and a pipe to
 watch, and the test checks that the timer ticked, the pipe was read, the
 plugin got an X11 window id, and the ticks stop once the window is closed.
-build.yml also makes the .deb, .rpm and AppImage, installs the .deb and runs
+`tests/update.test.js` runs a copy of the bridge against a local stand-in
+for GitHub: older, equal, newer and prerelease tags; an update that replaces
+the copy (Windows: the exe and the ASIO module, the old ones kept as `.old`;
+Linux: the program from the tar.gz, mode 755) with no temporary files left;
+a wrong or missing checksum that leaves the program untouched; and
+`--bundled` and `oros-bridge.bundled`, which refuse to update and run with no
+window. build.yml also makes the .deb, .rpm and AppImage, installs the .deb and runs
 both. Real cards and keyboards, the bridge's own window and real plugin
 windows are tested by hand.
