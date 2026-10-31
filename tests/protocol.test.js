@@ -16,6 +16,8 @@ const BRIDGE = process.env.OROS_BRIDGE;
 const PLUGINS = process.env.OROS_TEST_PLUGINS;
 const ORIGIN = "http://test.local";
 const IS_WIN = process.platform === "win32";
+// plugin windows: Win32, or X11 on Linux when there is a display (CI runs the Linux tests under Xvfb)
+const EDITORS = IS_WIN || (process.platform === "linux" && !!process.env.DISPLAY);
 
 let proc, port, out = "";
 const codes = [];
@@ -189,7 +191,7 @@ test("pairing: nothing before it, a wrong code fails, the right one gives a toke
   const c = await Client.open();
   const hello = await c.next();
   assert.equal(hello.event, "hello");
-  assert.equal(hello.editors, IS_WIN);
+  assert.equal(hello.editors, EDITORS);
   assert.equal((await c.cmd({ op: "list" })).error, "not paired");
   assert.equal((await c.cmd({ op: "auth", token: "0".repeat(64) })).ok, false);
   assert.equal((await c.cmd({ op: "pair" })).shown, true);
@@ -252,7 +254,23 @@ test("CLAP effect: latency, render, state round trip, reset", async () => {
   assert.equal((await c.cmd({ op: "reset", h: o.h })).ok, true);
   out = await c.render(o.h, [L], 256);   // mono in: both sides
   for (let i = 32; i < 256; i++) assert.ok(close(out[1][i], L[i - 32] * 0.25));
-  assert.equal((await c.cmd({ op: "editor", h: o.h })).ok, IS_WIN ? false : false, "the test plugin has no window");
+  // the gain has a window on Linux only (no Win32 one): the host's loop runs its timer and its pipe
+  const LINUX_WIN = EDITORS && !IS_WIN;
+  assert.equal(o.editor, LINUX_WIN);
+  assert.equal((await c.cmd({ op: "editor", h: o.h })).ok, LINUX_WIN);
+  if (LINUX_WIN) {
+    await new Promise((r) => setTimeout(r, 300));
+    const s1 = Buffer.from((await c.cmd({ op: "getState", h: o.h })).data, "base64");
+    const ticks = s1.readUInt32LE(4), reads = s1.readUInt32LE(8), parent = s1.readUInt32LE(12);
+    assert.ok(ticks >= 5, "timer ticks " + ticks);
+    assert.ok(reads >= ticks - 2 && reads <= ticks, "pipe bytes read " + reads + " of " + ticks);
+    assert.ok(parent > 0, "an X11 window id");
+    assert.equal((await c.cmd({ op: "closeEditor", h: o.h })).ok, true);
+    const t1 = Buffer.from((await c.cmd({ op: "getState", h: o.h })).data, "base64").readUInt32LE(4);
+    await new Promise((r) => setTimeout(r, 150));
+    const t2 = Buffer.from((await c.cmd({ op: "getState", h: o.h })).data, "base64").readUInt32LE(4);
+    assert.equal(t2, t1, "no ticks once the window is closed");
+  }
   assert.equal((await c.cmd({ op: "close", h: o.h })).ok, true);
   assert.equal((await c.cmd({ op: "info", h: o.h })).error, "unknown handle");
   c.close();

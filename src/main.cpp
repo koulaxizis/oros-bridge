@@ -21,8 +21,8 @@ using namespace ob;
 static const char* kUsage =
     "orOS Bridge " OROS_BRIDGE_VERSION "\n"
     "Lets orOS Studio use the VST3 and CLAP plugins on this computer.\n\n"
-    "  oros-bridge                 run; on Windows in its own window and the tray\n"
-    "  --tray                      start hidden in the tray (Windows)\n"
+    "  oros-bridge                 run in its own window and the tray (Windows; Linux with a desktop)\n"
+    "  --tray                      start hidden in the tray\n"
     "  --console                   run in the console instead of a window\n"
     "  --port N                    listen on 127.0.0.1:N (default 47621)\n"
     "  --allow-origin URL          also accept pages from URL (repeatable)\n"
@@ -80,6 +80,9 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
   bool gui = !console && !scanOnly && !forget && unknown.empty();
   if (!gui) useConsole();
+#elif defined(__linux__)
+  // a window when there is a desktop with GTK 3; a terminal program otherwise (and with --console)
+  bool gui = !console && !scanOnly && !forget && !help && unknown.empty() && guiAvailable();
 #else
   const bool gui = false;
   (void)tray;

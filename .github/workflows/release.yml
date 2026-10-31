@@ -50,12 +50,13 @@ jobs:
             gh release upload "$TAG" out/* --clobber
           else
             gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "orOS Bridge ${TAG#v}" \
-              --notes "Windows x64: download oros-bridge-windows-x64.exe, run it and keep its window open while you use orOS Studio (Studio → a track's settings → Plugin on this computer). ASIO®: oros-bridge-asio.dll goes next to the exe (the zip has both); it is GPLv3, source in asio/. ASIO is a registered trademark of Steinberg Media Technologies GmbH. ![ASIO Compatible](https://raw.githubusercontent.com/koulaxizis/oros-bridge/main/asio/logo/asio-compatible-bw.png) The exe is not signed yet: Windows SmartScreen may ask once (More info → Run anyway). Linux x64: oros-bridge-linux-x64.tar.gz, run ./oros-bridge in a terminal. Record through your sound card: Studio → Settings → Sound card → orOS Bridge. Hear yourself through a plugin while you record (Sound card → Listen through a plugin, 0.5.0); play an instrument plugin from a MIDI keyboard (0.6.0). SHA-256 sums in SHA256SUMS.txt. Free, MIT." \
+              --notes "Windows x64: download oros-bridge-windows-x64.exe, run it and keep its window open while you use orOS Studio (Studio → a track's settings → Plugin on this computer). ASIO®: oros-bridge-asio.dll goes next to the exe (the zip has both); it is GPLv3, source in asio/. ASIO is a registered trademark of Steinberg Media Technologies GmbH. ![ASIO Compatible](https://raw.githubusercontent.com/koulaxizis/oros-bridge/main/asio/logo/asio-compatible-bw.png) The exe is not signed yet: Windows SmartScreen may ask once (More info → Run anyway). Linux x64: install oros-bridge-linux-x64.deb (Debian, Ubuntu, Mint) or .rpm (Fedora, openSUSE) and open orOS Bridge from the applications menu, or make oros-bridge-linux-x64.AppImage executable and run it; the tar.gz has the bare program. Plugin windows need X11 or XWayland; the tray icon needs AppIndicator support (on GNOME the AppIndicator extension). Record through your sound card: Studio → Settings → Sound card → orOS Bridge. Hear yourself through a plugin while you record (Sound card → Listen through a plugin, 0.5.0); play an instrument plugin from a MIDI keyboard (0.6.0). SHA-256 sums in SHA256SUMS.txt. Free, MIT." \
               out/*
           fi
-  # Linux x64 (0.3.0, the sound card: JACK, PipeWire/PulseAudio, ALSA): a
-  # command-line program in a tar.gz, built on the oldest supported Ubuntu
-  # so it runs on older systems too; added to the same draft release.
+  # Linux x64 (0.3.0, the sound card: JACK, PipeWire/PulseAudio, ALSA): built
+  # on the oldest supported Ubuntu so it runs on older systems too; since
+  # 0.7.0 a window and tray icon, plugin windows on X11, and .deb, .rpm and
+  # AppImage beside the tar.gz (packaging/linux); added to the same draft release.
   linux:
     needs: windows
     runs-on: ubuntu-22.04
@@ -67,20 +68,23 @@ jobs:
           node-version: 22
       - name: CMake 3.28+
         run: pip install --user "cmake>=3.28,<4" && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: X11 headers and Xvfb
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libx11-dev xvfb desktop-file-utils
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - name: Build
         run: cmake --build build --parallel
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure && xvfb-run -a ctest --test-dir build --output-on-failure
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
       - name: Package and add to the draft
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           v=$(sed -n 's/^project(oros_bridge VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
-          mkdir -p pkg/oros-bridge out
-          cp build/oros-bridge README.md LICENSE THIRD_PARTY.md pkg/oros-bridge/
-          tar -C pkg -czf out/oros-bridge-linux-x64.tar.gz oros-bridge
+          sh packaging/linux/package-all.sh out
           gh release download "v$v" --pattern SHA256SUMS.txt --dir out
-          (cd out && sha256sum oros-bridge-linux-x64.tar.gz >> SHA256SUMS.txt && cat SHA256SUMS.txt)
-          gh release upload "v$v" out/oros-bridge-linux-x64.tar.gz out/SHA256SUMS.txt --clobber
+          (cd out && sha256sum oros-bridge-linux-x64.* >> SHA256SUMS.txt && cat SHA256SUMS.txt)
+          gh release upload "v$v" out/oros-bridge-linux-x64.* out/SHA256SUMS.txt --clobber

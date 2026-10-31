@@ -1,7 +1,7 @@
 # orOS Bridge: hosts the person's own VST3 and CLAP plugins for orOS Studio,
 # on this computer only (127.0.0.1). See DESIGN.md.
 cmake_minimum_required(VERSION 3.28)
-project(oros_bridge VERSION 0.6.0 LANGUAGES C CXX)
+project(oros_bridge VERSION 0.7.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -112,6 +112,15 @@ if(WIN32)
     # main() stays the entry point; our manifest is in the .rc
     target_link_options(oros-bridge PRIVATE /ENTRY:mainCRTStartup /MANIFEST:NO)
   endif()
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  # the window and tray icon (GTK 3, AppIndicator), both loaded at run time: no build dependency
+  file(READ ${CMAKE_CURRENT_SOURCE_DIR}/res/oros-bridge.png OROS_ICON_HEX HEX)
+  string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," OROS_ICON_BYTES "${OROS_ICON_HEX}")
+  file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/gen/gui_icon.h
+    "#pragma once\n// made by CMake from res/oros-bridge.png\nstatic const unsigned char kIconPng[] = {${OROS_ICON_BYTES}};\n")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS res/oros-bridge.png)
+  target_include_directories(oros-bridge PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/gen)
+  target_sources(oros-bridge PRIVATE src/gui_gtk.cpp)
 else()
   target_sources(oros-bridge PRIVATE src/gui_none.cpp)
 endif()

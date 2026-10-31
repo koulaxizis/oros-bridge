@@ -360,6 +360,8 @@ void createWindow() {
 }
 }  // namespace
 
+bool guiAvailable() { return true; }
+
 bool guiAlreadyRunning() {
   // held until the process ends
   HANDLE m = CreateMutexW(nullptr, FALSE, L"Local\\orOS-Bridge");

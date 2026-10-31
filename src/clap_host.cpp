@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <map>
 #include <set>
 #include <clap/clap.h>
 #include "dynlib.h"
@@ -11,6 +12,11 @@
 
 namespace ob {
 namespace {
+#ifdef _WIN32
+constexpr const char* kWindowApi = CLAP_WINDOW_API_WIN32;
+#else
+constexpr const char* kWindowApi = CLAP_WINDOW_API_X11;
+#endif
 
 // One loaded .clap file; shared by the plugins made from it.
 struct ClapModule {
@@ -115,6 +121,14 @@ public:
   int64_t steady = 0;
   std::unique_ptr<EditorWindow> win;
   std::function<void()> onEditorClosed;
+#ifndef _WIN32
+  // timers and descriptors the plugin asked for (Linux: no shared event loop), by its id / fd -> loop id
+  std::map<clap_id, int> timers;
+  std::map<int, int> fds;
+  clap_id nextTimer = 1;
+  const clap_plugin_timer_support_t* timerExt = nullptr;
+  const clap_plugin_posix_fd_support_t* fdExt = nullptr;
+#endif
   // extra ports get silence / a scratch buffer; the port layout is made at activate()
   std::vector<std::vector<float>> scratch;
   std::vector<clap_audio_buffer_t> bin, bout;
@@ -130,6 +144,10 @@ public:
       if (active) p->deactivate(p);
       p->destroy(p);
     }
+#ifndef _WIN32
+    for (auto& t : timers) MainLoop::get().removeTimer(t.second);
+    for (auto& f : fds) MainLoop::get().removeFd(f.second);
+#endif
   }
 
   static ClapPlugin* self(const clap_host_t* h) { return static_cast<ClapPlugin*>(h->host_data); }
@@ -171,8 +189,66 @@ public:
     if (!std::strcmp(id, CLAP_EXT_AUDIO_PORTS)) return &hostPorts;
     if (!std::strcmp(id, CLAP_EXT_NOTE_PORTS)) return &hostNotePorts;
     if (!std::strcmp(id, CLAP_EXT_GUI)) return &hostGui;
+#ifndef _WIN32
+    static const clap_host_timer_support_t hostTimer{
+        [](const clap_host_t* h, uint32_t ms, clap_id* tid) {
+          auto* s = self(h);
+          if (!tid || !MainLoop::get().onMainThread()) return false;
+          if (!s->timerExt && s->p)
+            s->timerExt = static_cast<const clap_plugin_timer_support_t*>(s->p->get_extension(s->p, CLAP_EXT_TIMER_SUPPORT));
+          if (!s->timerExt) return false;
+          clap_id id = s->nextTimer++;
+          s->timers[id] = MainLoop::get().addTimer(int(std::min<uint32_t>(std::max<uint32_t>(ms, 1), 60000)), [s, id] {
+            if (s->timerExt && s->p) s->timerExt->on_timer(s->p, id);
+          });
+          *tid = id;
+          return true;
+        },
+        [](const clap_host_t* h, clap_id id) {
+          auto* s = self(h);
+          auto it = s->timers.find(id);
+          if (it == s->timers.end()) return false;
+          MainLoop::get().removeTimer(it->second);
+          s->timers.erase(it);
+          return true;
+        }};
+    static const clap_host_posix_fd_support_t hostFd{
+        [](const clap_host_t* h, int fd, clap_posix_fd_flags_t flags) { return self(h)->watchFd(fd, flags, false); },
+        [](const clap_host_t* h, int fd, clap_posix_fd_flags_t flags) { return self(h)->watchFd(fd, flags, true); },
+        [](const clap_host_t* h, int fd) {
+          auto* s = self(h);
+          auto it = s->fds.find(fd);
+          if (it == s->fds.end()) return false;
+          MainLoop::get().removeFd(it->second);
+          s->fds.erase(it);
+          return true;
+        }};
+    if (!std::strcmp(id, CLAP_EXT_TIMER_SUPPORT)) return &hostTimer;
+    if (!std::strcmp(id, CLAP_EXT_POSIX_FD_SUPPORT)) return &hostFd;
+#endif
     return nullptr;
   }
+
+#ifndef _WIN32
+  bool watchFd(int fd, clap_posix_fd_flags_t flags, bool modify) {
+    if (!MainLoop::get().onMainThread()) return false;
+    auto it = fds.find(fd);
+    if (modify != (it != fds.end())) return false;   // register twice, or modify an unknown fd
+    if (!fdExt && p) fdExt = static_cast<const clap_plugin_posix_fd_support_t*>(p->get_extension(p, CLAP_EXT_POSIX_FD_SUPPORT));
+    if (!fdExt) return false;
+    if (modify) {
+      MainLoop::get().removeFd(it->second);
+      fds.erase(it);
+    }
+    short ev = short(((flags & CLAP_POSIX_FD_READ) ? POLLIN : 0) | ((flags & CLAP_POSIX_FD_WRITE) ? POLLOUT : 0));
+    fds[fd] = MainLoop::get().addFd(fd, ev, [this](int f, short re) {
+      clap_posix_fd_flags_t got = ((re & (POLLIN | POLLHUP)) ? CLAP_POSIX_FD_READ : 0) |
+                                  ((re & POLLOUT) ? CLAP_POSIX_FD_WRITE : 0) | ((re & (POLLERR | POLLNVAL)) ? CLAP_POSIX_FD_ERROR : 0);
+      if (fdExt && p) fdExt->on_fd(p, f, got);
+    });
+    return true;
+  }
+#endif
 
   bool load(const PluginInfo& info, std::string& err) {
     mod = loadModule(info.path, err);
@@ -374,17 +450,12 @@ public:
   }
 
   bool hasEditor() override {
-#ifdef _WIN32
-    return gui && gui->is_api_supported(p, CLAP_WINDOW_API_WIN32, false);
-#else
-    return false;
-#endif
+    return gui && EditorWindow::supported() && gui->is_api_supported(p, kWindowApi, false);
   }
   bool openEditor(const std::string& title, std::function<void()> onClosed, std::string& err) override {
     if (guiOpen) { if (win) win->show(); return true; }
     if (!hasEditor()) { err = "this plugin has no window here"; return false; }
-#ifdef _WIN32
-    if (!gui->create(p, CLAP_WINDOW_API_WIN32, false)) { err = "the plugin window could not be made"; return false; }
+    if (!gui->create(p, kWindowApi, false)) { err = "the plugin window could not be made"; return false; }
     guiOpen = true;
     uint32_t w = 400, h = 300;
     gui->get_size(p, &w, &h);
@@ -398,17 +469,16 @@ public:
                                });
     if (!win) { closeEditor(); err = "no window"; return false; }
     clap_window_t cw{};
-    cw.api = CLAP_WINDOW_API_WIN32;
+    cw.api = kWindowApi;
+#ifdef _WIN32
     cw.win32 = win->nativeHandle();
+#else
+    cw.x11 = clap_xwnd(reinterpret_cast<uintptr_t>(win->nativeHandle()));
+#endif
     if (!gui->set_parent(p, &cw)) { closeEditor(); err = "the plugin window could not be placed"; return false; }
     gui->show(p);
     win->show();
     return true;
-#else
-    (void)title; (void)onClosed;
-    err = "plugin windows are Windows only for now";
-    return false;
-#endif
   }
   void editorClosedByPerson() {
     auto cb = onEditorClosed;

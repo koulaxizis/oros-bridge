@@ -6,7 +6,8 @@ the computer: Studio talks to it over `127.0.0.1` (never the network), and it
 runs your plugins for Studio.
 
 Free, MIT, no account. It also records through your sound card (below).
-First version: **Windows**, plugins render ahead of
+For **Windows** and **Linux** (since 0.7.0 with its own window, plugin
+windows, and .deb, .rpm and AppImage downloads). Plugins render ahead of
 time ("freeze"): Studio sends a track through the plugin and gets the sound
 back, as fast as the plugin goes, so nothing crackles on a busy computer.
 
@@ -20,10 +21,21 @@ back, as fast as the plugin goes, so nothing crackles on a busy computer.
    icon for Open, Start with Windows and Quit.
    It is not signed yet, so Windows SmartScreen may ask once
    (More info → Run anyway).
+   On **Linux**, install [`oros-bridge-linux-x64.deb`](https://github.com/koulaxizis/oros-bridge/releases/latest/download/oros-bridge-linux-x64.deb)
+   (Debian, Ubuntu, Mint) or [`oros-bridge-linux-x64.rpm`](https://github.com/koulaxizis/oros-bridge/releases/latest/download/oros-bridge-linux-x64.rpm)
+   (Fedora, openSUSE) and open orOS Bridge from the applications menu, or
+   download [`oros-bridge-linux-x64.AppImage`](https://github.com/koulaxizis/oros-bridge/releases/latest/download/oros-bridge-linux-x64.AppImage),
+   make it executable and run it. The window is the same as on Windows; the
+   tray icon needs AppIndicator support (built into Ubuntu, KDE and most
+   desktops; on plain GNOME the AppIndicator extension), and without it
+   closing the window minimises it. Plugin windows open on X11 (or XWayland
+   under Wayland). Without a desktop, or with `--console`, the bridge runs in
+   the terminal.
 2. In Studio, open a track's settings and press `Plugin on this computer`. The bridge window shows a 6-digit code;
    type it in Studio once. Studio keeps a key, so next time it just connects.
 3. Studio lists your plugins (from `C:\Program Files\Common Files\VST3`,
-   `...\CLAP` and the same folders under your user). Pick one for a track,
+   `...\CLAP` and the same folders under your user; on Linux `~/.vst3`,
+   `~/.clap`, `/usr/lib/vst3`, `/usr/lib/clap` and the same under `/usr/local`). Pick one for a track,
    open its window to set it up, then freeze the track.
 
 ### Record through your sound card (0.3.0)
@@ -73,7 +85,8 @@ track.
 The window's `Forget paired browsers` (or `oros-bridge --forget-pairings`)
 forgets every browser you paired. `oros-bridge --scan` lists the plugins it
 finds, `oros-bridge --console` runs it in the console without a window, and
-`oros-bridge --tray` starts it hidden in the tray.
+`oros-bridge --tray` starts it hidden in the tray (`Start with Windows`, or
+`Start when I log in` on Linux, uses it).
 
 ## Safety
 

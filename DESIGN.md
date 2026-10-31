@@ -31,7 +31,8 @@ native code, so a separate program hosts them and Studio talks to it.
 6. **No third-party code beyond MIT**: VST 3 SDK 3.8.1 (MIT since 3.8.0),
    CLAP 1.2.9, nlohmann/json 3.11.3. No JUCE, no VSTGUI.
 7. **Windows first.** The code builds and its tests run on Linux too (CI
-   runs both), but plugin windows are Win32 only for now; macOS later.
+   runs both); Linux has plugin windows and its own window since 0.7.0
+   (decision 13); macOS later.
 8. **A window and a tray icon on Windows (0.2.0).** The exe is a window
    program (`WIN32_EXECUTABLE`, entry `mainCRTStartup`) instead of a
    console. The window (`src/gui_win32.cpp`) shows whether Studio is
@@ -48,7 +49,8 @@ native code, so a separate program hosts them and Studio talks to it.
    only the bridge's own window is created system-DPI-aware. `--console`
    keeps the command-line program (the tests use it); `--scan`,
    `--forget-pairings` and `--help` write to the console they were started
-   from. Other systems have no window (`src/gui_none.cpp`).
+   from. Linux has the same window since 0.7.0 (decision 13); other systems
+   have none (`src/gui_none.cpp`).
 
 9. **The sound card (0.3.0).** Studio in a browser hears and records
    through the system's shared mixer (WASAPI shared mode, PulseAudio): no
@@ -135,6 +137,32 @@ native code, so a separate program hosts them and Studio talks to it.
    too. `--test-audio` adds the keyboard "Test MIDI", played with
    `midiTest`.
 
+13. **Linux like Windows (0.7.0).** The bridge on Linux gets the same window
+   and tray icon (`src/gui_gtk.cpp`: status, pairing code, plugins and
+   folders, look for plugins, forget browsers, `Start when I log in` as an
+   XDG autostart file `~/.config/autostart/oros-bridge.desktop` with
+   `--tray`, the AppImage's own path when run from one) and plugin windows
+   on X11 (`src/editor.cpp`; XWayland under Wayland). GTK 3, the
+   AppIndicator (Ayatana, or the older libappindicator) and libX11 are
+   loaded at run time, so one binary runs everywhere: without a display or
+   GTK it is the terminal program it was (as with `--console`), without an
+   AppIndicator it has a window and no tray icon (closing minimises it,
+   Quit is a button, `--tray` starts it minimised), without X11 it offers
+   no plugin windows. Linux has no shared event loop, so `MainLoop` is a
+   `poll()` loop with a wake pipe, file descriptors and timers that plugins
+   borrow (VST 3 `IRunLoop` through the editor frame; CLAP
+   `timer-support` and `posix-fd-support`), and GLib's loop runs inside it
+   (`MainLoop::Guest`: prepare, query, poll together, check, dispatch), so
+   plugin calls, plugin windows and the bridge window share one thread. No
+   GTK dialog runs a nested loop (it would stop every plugin call). One
+   bridge per user: an abstract Unix socket `oros-bridge-<uid>`; a second
+   launch tells the first to show its window and ends. Greek when the
+   language (`LC_ALL`, `LC_MESSAGES`, `LANG`, `LANGUAGE`) is Greek. The
+   release adds `.deb` and `.rpm` (nfpm, GTK and the AppIndicator only
+   recommended) and an AppImage (appimagetool, GTK from the system) beside
+   the tar.gz (`packaging/linux/package-all.sh`); build.yml makes and
+   installs them on every PR.
+
 ## Protocol (WebSocket, `ws://127.0.0.1:47621/`)
 
 Text messages are JSON. A command carries `op` and an optional `id`; the
@@ -218,4 +246,10 @@ for sample, and switching it off must give the played sound back; a VST 3 goes
 live too. The live instrument test plays the CLAP test sine from the test
 keyboard during a take: silence before the note, the sine while it is held
 (starting within a frame of where `midiTake` puts the note), silence after.
-Real cards and keyboards are tested by hand.
+On Linux CI runs the test a second time under Xvfb: the CLAP test gain then
+has a window (Linux only) that asks the host for a 20 ms timer and a pipe to
+watch, and the test checks that the timer ticked, the pipe was read, the
+plugin got an X11 window id, and the ticks stop once the window is closed.
+build.yml also makes the .deb, .rpm and AppImage, installs the .deb and runs
+both. Real cards and keyboards, the bridge's own window and real plugin
+windows are tested by hand.
