@@ -461,7 +461,7 @@ test("live plugin: heard on the outputs, a dry take, a wet take, off again", asy
   assert.match((await c.cmd({ op: "reset", h: lv.h })).error, /live/);
   const r = await c.render(lv.h, [[0.5]], 1);
   assert.match(r.error, /live/);
-  assert.equal((await c.cmd({ op: "liveOpen", plugin: "clap:oros.test.sine", inputs: [0] })).error, "an instrument plays live from MIDI: not in this version");
+  assert.match((await c.cmd({ op: "liveOpen", plugin: "clap:oros.test.sine", inputs: [0] })).error, /MIDI keyboard/);
   // a wet take: input 3 records the plugin's sound instead (state from the page: gain 0.5)
   const st = Buffer.alloc(4); st.writeFloatLE(0.5, 0);
   const wv = await c.cmd({ op: "liveOpen", plugin: "clap:oros.test.gain", inputs: [2], out: 0, on: true, record: "wet", state: st.toString("base64") });
@@ -488,6 +488,58 @@ test("live plugin: heard on the outputs, a dry take, a wet take, off again", asy
   assert.equal(lv3.ok, true, lv3.error);
   assert.equal((await c.cmd({ op: "audioClose" })).ok, true);
   assert.equal((await c.cmd({ op: "info", h: lv3.h })).error, "unknown handle");
+  c.close();
+});
+
+// ---- an instrument live from a MIDI keyboard the bridge reads (0.6.0) ----
+// "Test MIDI" (--test-audio) plays what midiTest hands in; the test sine
+// sounds a = velocity / 4 per held note on outputs 1/2, which the loopback
+// card brings back on input 1 333 frames later.
+test("live instrument: a MIDI keyboard plays it on the card, the take keeps the notes", async () => {
+  const c = await paired();
+  const md = await c.cmd({ op: "midiDevices" });
+  assert.equal(md.ok, true);
+  assert.equal(md.inputs[0], "Test MIDI");
+  await c.cmd({ op: "scan" });
+  assert.equal((await c.cmd({ op: "audioOpen", backend: "test", sr: 48000, period: 128, record: [0] })).ok, true);
+  assert.match((await c.cmd({ op: "liveOpen", plugin: "clap:oros.test.sine" })).error, /MIDI keyboard/);
+  assert.match((await c.cmd({ op: "liveOpen", plugin: "clap:oros.test.sine", midi: "No such" })).error, /no such MIDI input/);
+  const lv = await c.cmd({ op: "liveOpen", plugin: "clap:oros.test.sine", midi: "Test MIDI", on: true });
+  assert.equal(lv.ok, true, lv.error);
+  assert.deepEqual([lv.instrument, lv.midi, lv.outputs], [true, "Test MIDI", 2]);
+  assert.equal((await c.cmd({ op: "audioPlay", frames: 0, channels: 0 })).ok, true);
+  assert.equal((await c.cmd({ op: "audioStart" })).ok, true);
+  await sleep(150);
+  assert.equal((await c.cmd({ op: "midiTest", bytes: [0x90, 69, 127] })).ok, true);   // note on, a = 0.25
+  await sleep(250);
+  assert.equal((await c.cmd({ op: "midiTest", bytes: [69, 0] })).ok, true);           // running status: velocity 0 = off
+  await sleep(200);
+  const s = await c.cmd({ op: "audioStop" });
+  assert.equal(s.ok, true, s.error);
+  const n = s.frames;
+  const { bin } = await c.take({ offset: 0, frames: n });
+  const at = (i) => bin.readFloatLE(16 + i * 4);
+  const mt = await c.cmd({ op: "midiTake" });
+  assert.equal(mt.ok, true, mt.error);
+  assert.deepEqual(mt.events.map((e) => e.slice(1)), [[0x90, 69, 127], [0x90, 69, 0]]);
+  const [on, off] = mt.events.map((e) => e[0]);
+  assert.ok(on > 4000 && on < off && off < n, "frames " + on + " " + off);
+  // silence before the note, a 440 Hz sine at 0.25 while it is held, silence after
+  let pk = 0;
+  for (let i = 0; i < on + 333; i++) pk = Math.max(pk, Math.abs(at(i)));
+  assert.equal(pk, 0, "silent before the note");
+  pk = 0;
+  for (let i = on + 333 + 200; i < off + 333 - 200; i++) pk = Math.max(pk, Math.abs(at(i)));
+  assert.ok(pk > 0.24 && pk <= 0.25 + 1e-6, "peak " + pk);
+  pk = 0;
+  for (let i = off + 333 + 200; i < n; i++) pk = Math.max(pk, Math.abs(at(i)));
+  assert.equal(pk, 0, "silent after the note");
+  // the sound starts where the take says the note came
+  let first = on + 333;
+  while (first < n && at(first) === 0) first++;
+  assert.ok(first - (on + 333) <= 1, "starts at " + first + ", note at " + (on + 333));
+  assert.equal((await c.cmd({ op: "audioClose" })).ok, true);
+  assert.equal((await c.cmd({ op: "midiTest", bytes: [0x90, 60, 1] })).error, "no live keyboard");
   c.close();
 });
 

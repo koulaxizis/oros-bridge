@@ -62,6 +62,14 @@ headphones: a microphone near speakers howls. A plugin that cannot keep up
 with the card turns itself off and Studio says so; nothing past full scale
 reaches the card.
 
+### Play an instrument plugin from a MIDI keyboard (0.6.0)
+
+Choose an instrument in `Listen through a plugin` and the keyboard it plays
+from: the bridge reads the keyboard itself (Windows MIDI, or ALSA's MIDI
+devices on Linux) and the notes reach the plugin in the sound card's
+callback. A take keeps the notes you played, and Studio puts them on the
+track.
+
 The window's `Forget paired browsers` (or `oros-bridge --forget-pairings`)
 forgets every browser you paired. `oros-bridge --scan` lists the plugins it
 finds, `oros-bridge --console` runs it in the console without a window, and

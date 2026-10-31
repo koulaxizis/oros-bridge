@@ -7,6 +7,7 @@
 #include <mutex>
 #include "config.h"
 #include "plugin.h"
+#include "midi.h"
 
 namespace ob {
 
@@ -226,7 +227,7 @@ void AudioEngine::callback(const float* in, uint32_t inCh, float* out, uint32_t 
         for (uint32_t f = 0; f < n; f++) out[size_t(f) * outCh + playOut_ + 1] = out[size_t(f) * outCh + playOut_];
     }
   }
-  if (fx) runLive(*fx, in, inCh, out, outCh, frames);   // also while stopped: the person hears themselves
+  if (fx) runLive(*fx, in, inCh, out, outCh, frames, running_.load());   // also while stopped: the person hears themselves
   if (running_.load()) {
     if (!rec_.empty()) {
       uint64_t w = wrote_.load(std::memory_order_relaxed), r = read_.load(std::memory_order_acquire);
@@ -262,6 +263,11 @@ void LiveFx::prepare(uint32_t frames, uint32_t ins, uint32_t outs) {
   pluginIns = ins;
   pluginOuts = outs;
   inBuf.assign(ins, std::vector<float>(frames, 0.f));
+  events.clear();
+  events.reserve(kMaxEvents);
+  blockEvents.clear();
+  blockEvents.reserve(kMaxEvents);
+  lastNs = 0;
   outBuf.assign(outs, std::vector<float>(frames, 0.f));
   inPtr.clear();
   outPtr.clear();
@@ -271,10 +277,30 @@ void LiveFx::prepare(uint32_t frames, uint32_t ins, uint32_t outs) {
 
 // On the card's thread: the inputs through the plugin, its sound added to the
 // outputs (when on) and kept for a wet take. Nothing here allocates or waits.
-void AudioEngine::runLive(LiveFx& fx, const float* in, uint32_t inCh, float* out, uint32_t outCh, uint32_t frames) {
-  if (fx.failed.load(std::memory_order_relaxed) || fx.slow.load(std::memory_order_relaxed)) return;
-  static const std::vector<MidiEvent> kNoEvents;
+void AudioEngine::runLive(LiveFx& fx, const float* in, uint32_t inCh, float* out, uint32_t outCh, uint32_t frames, bool taking) {
   const auto t0 = std::chrono::steady_clock::now();
+  const double rate = double(stream_ ? stream_->sampleRate : 48000);
+  // the keyboard: what came since the last period, placed where it came inside
+  // that period (one period later, without jitter), and kept for the take
+  fx.events.clear();
+  if (fx.midi) {
+    const int64_t now = midiNow();
+    MidiStamped m;
+    while (fx.midi->queue().pop(m)) {
+      int64_t off = fx.lastNs ? int64_t(double(m.ns - fx.lastNs) * rate / 1e9) : 0;
+      uint32_t at = uint32_t(std::clamp<int64_t>(off, 0, int64_t(frames) - 1));
+      if (fx.events.size() < kMaxEvents) fx.events.push_back({at, m.status, m.d1, m.d2});
+      if (taking) {
+        uint32_t k = midiN_.load(std::memory_order_relaxed);
+        if (k < midiTake_.size()) {
+          midiTake_[k] = {pos_.load() + at, m.status, m.d1, m.d2};
+          midiN_.store(k + 1, std::memory_order_release);
+        } else midiLost_++;
+      }
+    }
+    fx.lastNs = now;
+  }
+  if (fx.failed.load(std::memory_order_relaxed) || fx.slow.load(std::memory_order_relaxed)) return;
   const bool on = fx.on.load(std::memory_order_relaxed);
   const float g = on ? fx.gain.load(std::memory_order_relaxed) : 0.f;
   const uint32_t po = fx.pluginOuts, cap = uint32_t(wet_.size() / po);
@@ -282,12 +308,15 @@ void AudioEngine::runLive(LiveFx& fx, const float* in, uint32_t inCh, float* out
   for (uint32_t done = 0; done < frames;) {
     uint32_t n = std::min(fx.maxFrames, frames - done);
     for (uint32_t c = 0; c < fx.pluginIns; c++) {
-      uint32_t src = fx.inputs[std::min<size_t>(c, fx.inputs.size() - 1)];
+      uint32_t src = fx.inputs.empty() ? inCh : fx.inputs[std::min<size_t>(c, fx.inputs.size() - 1)];
       float* b = fx.inBuf[c].data();
       if (src < inCh) for (uint32_t f = 0; f < n; f++) b[f] = in[size_t(done + f) * inCh + src];
       else std::fill(b, b + n, 0.f);
     }
-    if (!fx.plugin->process(fx.inPtr.data(), fx.outPtr.data(), n, kNoEvents)) {
+    fx.blockEvents.clear();
+    for (auto& e : fx.events)
+      if (e.offset >= done && e.offset < done + n) fx.blockEvents.push_back({e.offset - done, e.status, e.d1, e.d2});
+    if (!fx.plugin->process(fx.inPtr.data(), fx.outPtr.data(), n, fx.blockEvents)) {
       fx.failed = true;
       return;
     }
@@ -321,7 +350,7 @@ void AudioEngine::runLive(LiveFx& fx, const float* in, uint32_t inCh, float* out
   if (pk > fx.peak.load(std::memory_order_relaxed)) fx.peak.store(pk, std::memory_order_relaxed);
   // slower than the card: after a few periods in a row it turns itself off
   const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-  const double period = double(frames) / double(stream_ ? stream_->sampleRate : 48000);
+  const double period = double(frames) / rate;
   fx.late = took > period ? fx.late + 1 : 0;
   if (fx.late >= kLiveLatePeriods) fx.slow = true;
 }
@@ -332,6 +361,9 @@ bool AudioEngine::setLive(LiveFx* fx, std::string& err) {
   detachLive();
   if (!fx) return true;
   wet_.assign(size_t(std::max<uint32_t>(stream_->period * 4, 16384)) * fx->pluginOuts, 0.f);
+  if (fx->midi && midiTake_.size() < kMaxMidiTake) midiTake_.resize(kMaxMidiTake);
+  midiN_ = 0;
+  midiLost_ = 0;
   fx->stopReq = false;
   fx->stopped = false;
   fx->late = 0;
@@ -404,6 +436,8 @@ bool AudioEngine::start(std::string& err) {
   wrote_ = 0;
   read_ = 0;
   lost_ = 0;
+  midiN_ = 0;
+  midiLost_ = 0;
   takeFrames_ = 0;
   stopReq_ = false;
   startReq_.store(true, std::memory_order_release);
@@ -462,5 +496,14 @@ std::vector<float> AudioEngine::takePeaks() {
   if (!stream_) return out;
   for (uint32_t c = 0; c < inCh_ && c < kMaxRecordChannels; c++) out.push_back(peaks_[c].exchange(0.f));
   return out;
+}
+
+bool AudioEngine::readMidiTake(std::vector<MidiTaken>& out, uint64_t& lost, std::string& err) {
+  if (!stream_) { err = "no sound card open"; return false; }
+  if (running_) { err = "recording"; return false; }
+  uint32_t n = std::min<uint32_t>(midiN_.load(std::memory_order_acquire), uint32_t(midiTake_.size()));
+  out.assign(midiTake_.begin(), midiTake_.begin() + n);
+  lost = midiLost_.load();
+  return true;
 }
 }

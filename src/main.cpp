@@ -6,6 +6,7 @@
 #include <iostream>
 #include <thread>
 #include "audio.h"
+#include "midi.h"
 #include "config.h"
 #include "gui.h"
 #include "mainloop.h"
@@ -71,7 +72,7 @@ int main(int argc, char** argv) {
     else if (a == "--forget-pairings") forget = true;
     else if (a == "--console") console = true;
     else if (a == "--tray") tray = true;
-    else if (a == "--test-audio") enableTestAudio();
+    else if (a == "--test-audio") { enableTestAudio(); enableTestMidi(); }
     else if (a == "--audio-module") addAudioModule(next());
     else if (a == "--help" || a == "-h") { console = true; help = true; }
     else { unknown = a; break; }
