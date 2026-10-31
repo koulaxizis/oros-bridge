@@ -51,7 +51,7 @@ static void followCode(Pairing& pairing, std::string path) {
         fs::remove(fs::u8path(path), ec);
       } else {
         std::string tmp = path + ".tmp";
-        { std::ofstream(fs::u8path(tmp), std::ios::trunc) << code << "\n"; }
+        { std::ofstream(fs::u8path(tmp), std::ios::binary | std::ios::trunc) << code << "\n"; }   // binary: "\n" on Windows too
         fs::rename(fs::u8path(tmp), fs::u8path(path), ec);
       }
     }
