@@ -91,7 +91,7 @@ public:
   ParameterChanges changes{1024};
   ProcessContext context{};
   uint32_t ins = 0, outs = 0, maxFrames = 0;
-  bool active = false, processing = false;
+  bool active = false, processing = false, realtime = false;
   std::vector<std::vector<float>> scratch;
   IPtr<IPlugView> view;
   std::unique_ptr<EditorWindow> win;
@@ -159,9 +159,10 @@ public:
     return true;
   }
 
-  bool activate(double sr, uint32_t frames, std::string& err) override {
+  bool activate(double sr, uint32_t frames, bool rt, std::string& err) override {
     stop();
-    ProcessSetup setup{kOffline, kSample32, int32(frames), sr};
+    realtime = rt;
+    ProcessSetup setup{rt ? kRealtime : kOffline, kSample32, int32(frames), sr};
     if (processor->setupProcessing(setup) != kResultOk) { err = "the plugin refused the sample rate or block size"; return false; }
     data.prepare(*component, 0, kSample32);
     data.inputEvents = &events;
@@ -231,8 +232,9 @@ public:
       events.addEvent(e);
     }
     changes.clearQueue();
-    {
-      std::lock_guard<std::mutex> g(handler.mu);
+    // the edits from the plugin's window; on a sound card's thread only if the window is not adding one now
+    std::unique_lock<std::mutex> g(handler.mu, std::defer_lock);
+    if (realtime ? g.try_lock() : (g.lock(), true)) {
       for (auto& pv : handler.pending) {
         int32 idx = 0, pidx = 0;
         if (auto* q = changes.addParameterData(pv.first, idx)) q->addPoint(0, pv.second, pidx);

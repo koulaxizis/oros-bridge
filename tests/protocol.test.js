@@ -408,6 +408,89 @@ test("sound card: bad requests are refused", async () => {
   c2.close();
 });
 
+// ---- a plugin live on an input (0.5.0) ----
+// The test gain (latency 32, gain 0.5) live on loopback input 3 (= output 1 at
+// half level, 333 frames later), heard on outputs 1/2: what reaches output 1
+// comes back through the plugin, so out[u] = play[u] + 0.25 * out[u - 365].
+function liveOut(P, n) {
+  const O = new Float32Array(n);
+  for (let u = 0; u < n; u++) {
+    const back = u >= 365 ? Math.fround(Math.fround(0.5 * Math.fround(0.5 * O[u - 365])) * 1) : 0;
+    O[u] = Math.fround((u < P.length ? P[u] : 0) + back);
+  }
+  return O;
+}
+async function liveTake(c, N, n) {
+  const L = ramp(N);
+  assert.equal((await c.cmd({ op: "audioPlay", frames: N, channels: 1, out: 0 })).ok, true);
+  for (let at = 0; at < N; at += 4000) c.send(playBlock(at, [L.slice(at, at + 4000)]), 2);
+  assert.equal((await c.cmd({ op: "audioStart" })).ok, true);
+  await sleep(600);
+  const s = await c.cmd({ op: "audioStop" });
+  assert.equal(s.ok, true, s.error);
+  assert.ok(s.frames >= n, "recorded " + s.frames);
+  const { bin } = await c.take({ offset: 0, frames: n });
+  return { L, at: (ch, i) => bin.readFloatLE(16 + (ch * n + i) * 4) };
+}
+
+test("live plugin: heard on the outputs, a dry take, a wet take, off again", async () => {
+  const c = await paired();
+  await c.cmd({ op: "scan" });
+  assert.equal((await c.cmd({ op: "liveOpen", plugin: "clap:oros.test.gain", inputs: [2] })).error, "no sound card open");
+  const o = await c.cmd({ op: "audioOpen", backend: "test", sr: 48000, period: 128, record: [0, 2] });
+  assert.equal(o.ok, true, o.error);
+  const lv = await c.cmd({ op: "liveOpen", plugin: "clap:oros.test.gain", inputs: [2], out: 0, gain: 1, on: true });
+  assert.equal(lv.ok, true, lv.error);
+  assert.deepEqual([lv.latency, lv.monitor, lv.inputs, lv.outputs, lv.on, lv.record], [32, 365, 2, 2, true, "dry"]);
+  // a dry take: input 1 records output 1, which carries the plugin's sound
+  const N = 9000, n = 333 + N + 2000;
+  let t = await liveTake(c, N, n);
+  let O = liveOut(t.L, n);
+  for (let i = 0; i < 333; i++) assert.equal(t.at(0, i), 0);
+  for (let i = 333; i < n; i++) assert.ok(close(t.at(0, i), O[i - 333]), "dry input 1 at " + i + ": " + t.at(0, i) + " vs " + O[i - 333]);
+  for (let i = 333; i < n; i++) assert.ok(close(t.at(1, i), Math.fround(0.5 * O[i - 333])), "dry input 3 at " + i);
+  // the meters show the plugin
+  let ev;
+  for (;;) { const m = await c.next(); if (m && m.event === "levels" && m.live) { ev = m; break; } }
+  assert.equal(ev.live.h, lv.h);
+  assert.equal(ev.live.on, true);
+  assert.equal(ev.live.slow, false);
+  // its window, state and info work on the live one; a render or reset does not
+  assert.equal((await c.cmd({ op: "info", h: lv.h })).latency, 32);
+  assert.equal((await c.cmd({ op: "getState", h: lv.h })).ok, true);
+  assert.match((await c.cmd({ op: "reset", h: lv.h })).error, /live/);
+  const r = await c.render(lv.h, [[0.5]], 1);
+  assert.match(r.error, /live/);
+  assert.equal((await c.cmd({ op: "liveOpen", plugin: "clap:oros.test.sine", inputs: [0] })).error, "an instrument plays live from MIDI: not in this version");
+  // a wet take: input 3 records the plugin's sound instead (state from the page: gain 0.5)
+  const st = Buffer.alloc(4); st.writeFloatLE(0.5, 0);
+  const wv = await c.cmd({ op: "liveOpen", plugin: "clap:oros.test.gain", inputs: [2], out: 0, on: true, record: "wet", state: st.toString("base64") });
+  assert.equal(wv.ok, true, wv.error);
+  assert.equal((await c.cmd({ op: "info", h: lv.h })).error, "unknown handle");   // a new live plugin replaces the first
+  t = await liveTake(c, N, n);
+  O = liveOut(t.L, n);
+  for (let i = 333; i < n; i++) assert.ok(close(t.at(0, i), O[i - 333]), "input 1 at " + i);
+  for (let i = 365; i < n; i++) assert.ok(close(t.at(1, i), Math.fround(0.25 * O[i - 365])), "wet input 3 at " + i + ": " + t.at(1, i));
+  // off: nothing comes back, input 1 is what was played
+  const off = await c.cmd({ op: "liveSet", on: false, gain: 0.7 });
+  assert.deepEqual([off.on, Math.fround(off.gain)], [false, Math.fround(0.7)]);
+  t = await liveTake(c, N, n);
+  for (let i = 0; i < N; i++) assert.equal(t.at(0, 333 + i), t.L[i], "off: input 1 at " + i);
+  assert.equal((await c.cmd({ op: "liveSet", gain: 9 })).error, "bad gain");
+  assert.equal((await c.cmd({ op: "liveOpen", plugin: "clap:oros.test.gain", inputs: [9] })).error, "bad inputs");
+  assert.equal((await c.cmd({ op: "liveOpen", plugin: "clap:oros.test.gain", inputs: [0], record: "x" })).error, "bad record");
+  // closing it by its handle takes it off the inputs
+  assert.equal((await c.cmd({ op: "close", h: wv.h })).ok, true);
+  assert.equal((await c.cmd({ op: "liveSet", on: true })).error, "no live plugin");
+  // a VST 3 live too; closing the card closes it
+  const v3 = (await c.cmd({ op: "list" })).plugins.find((p) => p.format === "vst3" && !p.instrument);
+  const lv3 = await c.cmd({ op: "liveOpen", plugin: v3.id, inputs: [0, 1], on: false });
+  assert.equal(lv3.ok, true, lv3.error);
+  assert.equal((await c.cmd({ op: "audioClose" })).ok, true);
+  assert.equal((await c.cmd({ op: "info", h: lv3.h })).error, "unknown handle");
+  c.close();
+});
+
 // ---- a sound system from a separate library (src/audio_module.h) ----
 // the test module: input 1/2 = output 1/2 100 frames later, input 3 = output 2 at a quarter
 async function lineUp(c, open, { delay, inputs, check }) {

@@ -50,6 +50,18 @@ MIT and offers everything else.
 
 ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 
+### Hear yourself through a plugin (0.5.0)
+
+In Studio › Settings › Sound card › Listen through a plugin, choose an effect
+(an amp for a guitar, a reverb for a voice) and the inputs it takes. The
+bridge runs that plugin in the sound card's own callback, so you hear the
+inputs through it with only the card's buffers and the plugin's own latency in
+between. A take records the inputs dry (the plugin stays on the track, freeze
+it when you like the sound), or with the plugin's sound if you choose so. Use
+headphones: a microphone near speakers howls. A plugin that cannot keep up
+with the card turns itself off and Studio says so; nothing past full scale
+reaches the card.
+
 The window's `Forget paired browsers` (or `oros-bridge --forget-pairings`)
 forgets every browser you paired. `oros-bridge --scan` lists the plugins it
 finds, `oros-bridge --console` runs it in the console without a window, and

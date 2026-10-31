@@ -55,6 +55,39 @@ void enableTestAudio();   // adds the loopback backend (tests only)
 // also offer the sound system in this library (audio_module.h); before the first audioBackends()
 void addAudioModule(const std::string& path);
 
+class Plugin;
+
+// ---------- a plugin live on an input (0.5.0) ----------
+// While the card runs, the chosen inputs go through the plugin in the card's
+// own callback and its sound is added to the outputs, so the person hears
+// themselves through it (an amp, a reverb) with only the card's buffers and
+// the plugin's latency in between. The plugin is a second instance activated
+// for real time; the session opens and closes it on the main thread, and its
+// process() runs only here. A take records the dry inputs unless `wet`: then
+// the take's channels that are the plugin's inputs hold its sound instead
+// (not moved by its latency; the page knows it).
+struct LiveFx {
+  Plugin* plugin = nullptr;        // owned by the session; process() on the card's thread only
+  std::vector<uint32_t> inputs;    // 1 or 2 card inputs
+  uint32_t out = 0;                // first output channel
+  bool wet = false;
+  uint32_t maxFrames = 0, pluginIns = 0, pluginOuts = 0;
+  std::atomic<float> gain{1.f};
+  std::atomic<bool> on{false};
+  // the card's thread reports: its loudest output since the last look, too
+  // slow (turned itself off), failed
+  std::atomic<float> peak{0.f};
+  std::atomic<bool> slow{false}, failed{false};
+  // planar buffers, made before the plugin goes live
+  std::vector<std::vector<float>> inBuf, outBuf;
+  std::vector<const float*> inPtr;
+  std::vector<float*> outPtr;
+  // engine side
+  std::atomic<bool> stopReq{false}, stopped{false};
+  uint32_t late = 0;               // periods in a row the plugin took longer than the period
+  void prepare(uint32_t frames, uint32_t ins, uint32_t outs);
+};
+
 // ---------- a take ----------
 // One open card for one page: it plays what the page sent (prepared ahead,
 // so the page never feeds the card in real time) and records chosen inputs
@@ -83,9 +116,15 @@ public:
   bool readTake(uint64_t offset, uint32_t frames, std::vector<float>& planar, uint32_t& got, std::string& err);
   // the loudest sample of every input channel since the last call (for meters)
   std::vector<float> takePeaks();
+  // put a plugin live on the inputs (nullptr takes it off); only while stopped.
+  // Taking it off waits until the card's thread has let go of it.
+  bool setLive(LiveFx* fx, std::string& err);
+  LiveFx* live() const { return live_.load(); }
 
 private:
   void callback(const float* in, uint32_t inCh, float* out, uint32_t outCh, uint32_t frames);
+  void runLive(LiveFx& fx, const float* in, uint32_t inCh, float* out, uint32_t outCh, uint32_t frames);
+  void detachLive();
   void writer();
   std::unique_ptr<AudioStream> stream_;
   std::vector<uint32_t> rec_;
@@ -105,8 +144,12 @@ private:
   std::string path_;
   uint64_t takeFrames_ = 0;
   std::unique_ptr<std::atomic<float>[]> peaks_;
+  std::atomic<LiveFx*> live_{nullptr};
+  std::atomic<bool> inCallback_{false};
+  std::vector<float> wet_;           // the plugin's sound per frame, for a wet take (interleaved, pluginOuts)
 };
 
 constexpr uint32_t kMaxRecordChannels = 32;
+constexpr uint32_t kLiveLatePeriods = 8;     // a live plugin this many periods late in a row turns off
 constexpr uint64_t kMaxPlayFloats = 1ull << 28;   // 1 GiB of sound to play
 }
