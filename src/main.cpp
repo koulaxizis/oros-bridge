@@ -3,6 +3,8 @@
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <thread>
 #include "audio.h"
@@ -30,7 +32,32 @@ static const char* kUsage =
     "  --scan                      look for plugins, print them, exit\n"
     "  --forget-pairings           forget every paired browser, exit\n"
     "  --test-audio                also offer a loopback sound card (tests)\n"
-    "  --audio-module PATH         also offer the sound system in this library\n";
+    "  --audio-module PATH         also offer the sound system in this library\n"
+    "  --code-file PATH            keep the open pairing code in PATH (removed when none is open)\n";
+
+// --code-file (0.7.1): a system without the bridge's window (orOS USB) shows
+// the pairing code itself. The file holds the code and a newline while one is
+// open and is gone otherwise; it is replaced whole (rename), never half written.
+static void followCode(Pairing& pairing, std::string path) {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  fs::remove(fs::u8path(path), ec);
+  std::string shown;
+  for (;;) {
+    std::string code = pairing.currentCode();
+    if (code != shown) {
+      shown = code;
+      if (code.empty()) {
+        fs::remove(fs::u8path(path), ec);
+      } else {
+        std::string tmp = path + ".tmp";
+        { std::ofstream(fs::u8path(tmp), std::ios::trunc) << code << "\n"; }
+        fs::rename(fs::u8path(tmp), fs::u8path(path), ec);
+      }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  }
+}
 
 #ifdef _WIN32
 // The program is built as a window program, so it has no console of its own.
@@ -54,6 +81,7 @@ int main(int argc, char** argv) {
   opt.origins = {"https://useoros.online", "https://www.useoros.online"};
   std::string dir = Config::defaultDir();
   bool scanOnly = false, forget = false, console = false, tray = false, help = false;
+  std::string codeFile;
   std::string unknown;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -74,6 +102,7 @@ int main(int argc, char** argv) {
     else if (a == "--tray") tray = true;
     else if (a == "--test-audio") { enableTestAudio(); enableTestMidi(); }
     else if (a == "--audio-module") addAudioModule(next());
+    else if (a == "--code-file") codeFile = next();
     else if (a == "--help" || a == "-h") { console = true; help = true; }
     else { unknown = a; break; }
   }
@@ -119,6 +148,7 @@ int main(int argc, char** argv) {
             << "Settings: " << cfg.dir() << "\n"
             << "Keep this window open while you use orOS Studio.\n" << std::flush;
   std::thread net([&] { server.run(); });
+  if (!codeFile.empty()) std::thread(followCode, std::ref(pairing), codeFile).detach();
   if (gui) return guiRun(cfg, server, pairing, tray);
   // Ctrl+C or closing the window ends the bridge; the system frees the plugins
   std::signal(SIGINT, [](int) { std::_Exit(0); });
