@@ -42,25 +42,42 @@ bool hasFeature(const clap_plugin_descriptor_t* d, const char* f) {
   return false;
 }
 
-// The events of one block, CLAP style.
+// The events of one block, CLAP style, in storage made once (no allocation
+// while processing, which may be on a sound card's thread).
+union AnyEvent {
+  clap_event_header_t header;
+  clap_event_note_t note;
+  clap_event_midi_t midi;
+};
 struct EventList {
-  std::vector<std::vector<uint8_t>> storage;
+  std::vector<AnyEvent> storage;
   std::vector<const clap_event_header_t*> list;
   clap_input_events_t in{this, &EventList::size, &EventList::get};
+  EventList() {
+    storage.reserve(kMaxEvents);
+    list.reserve(kMaxEvents);
+  }
   static uint32_t size(const clap_input_events_t* l) { return uint32_t(static_cast<const EventList*>(l->ctx)->list.size()); }
   static const clap_event_header_t* get(const clap_input_events_t* l, uint32_t i) {
     auto* self = static_cast<const EventList*>(l->ctx);
     return i < self->list.size() ? self->list[i] : nullptr;
   }
-  template <class T>
-  void push(const T& ev) {
-    storage.emplace_back(sizeof(T));
-    std::memcpy(storage.back().data(), &ev, sizeof(T));
+  void pushNote(const clap_event_note_t& n) {
+    if (storage.size() < kMaxEvents) { storage.emplace_back(); storage.back().note = n; }
   }
+  void pushMidi(const clap_event_midi_t& m) {
+    if (storage.size() < kMaxEvents) { storage.emplace_back(); storage.back().midi = m; }
+  }
+  // in time order, keeping the order of events at the same frame (insertion sort: few events, no allocation)
   void finish() {
     list.clear();
-    for (auto& s : storage) list.push_back(reinterpret_cast<const clap_event_header_t*>(s.data()));
-    std::stable_sort(list.begin(), list.end(), [](auto a, auto b) { return a->time < b->time; });
+    for (auto& e : storage) {
+      const clap_event_header_t* h = &e.header;
+      size_t i = list.size();
+      list.push_back(h);
+      while (i > 0 && list[i - 1]->time > h->time) { list[i] = list[i - 1]; i--; }
+      list[i] = h;
+    }
   }
   void clear() { storage.clear(); list.clear(); }
 };
@@ -92,13 +109,18 @@ public:
   const clap_plugin_params_t* params = nullptr;
   const clap_plugin_note_ports_t* notePorts = nullptr;
   uint32_t ins = 0, outs = 2, maxFrames = 0;
-  bool active = false, processing = false, guiOpen = false;
+  bool active = false, guiOpen = false, realtime = false;
+  std::atomic<bool> processing{false};
   std::atomic<bool> dirtyFlag{false}, flushWanted{false};
   int64_t steady = 0;
   std::unique_ptr<EditorWindow> win;
   std::function<void()> onEditorClosed;
-  // extra ports get silence / a scratch buffer
+  // extra ports get silence / a scratch buffer; the port layout is made at activate()
   std::vector<std::vector<float>> scratch;
+  std::vector<clap_audio_buffer_t> bin, bout;
+  std::vector<std::vector<float*>> pin, pout;
+  std::vector<std::pair<uint32_t, uint32_t>> silentIn;   // (port, channel) to clear before each block
+  EventList ev;
 
   ~ClapPlugin() override {
     alive().erase(this);
@@ -196,23 +218,69 @@ public:
 
   void flushParams() {
     flushWanted = false;
-    if (!params || !p || processing) return;
-    EventList none;
-    none.finish();
-    params->flush(p, &none.in, &kDropEvents);
+    if (!params || !p || processing || realtime) return;   // while active the flush belongs to the audio thread
+    static const clap_input_events_t none{nullptr, [](const clap_input_events_t*) -> uint32_t { return 0; },
+                                          [](const clap_input_events_t*, uint32_t) -> const clap_event_header_t* { return nullptr; }};
+    params->flush(p, &none, &kDropEvents);
   }
 
-  bool activate(double sr, uint32_t frames, std::string& err) override {
+  bool activate(double sr, uint32_t frames, bool rt, std::string& err) override {
     if (processing) { p->stop_processing(p); processing = false; }
     if (active) { p->deactivate(p); active = false; }
     if (!p->activate(p, sr, 1, frames)) { err = "the plugin refused the sample rate or block size"; return false; }
     active = true;
     maxFrames = frames;
-    scratch.assign(64, std::vector<float>(frames, 0.f));
+    realtime = rt;
+    layout();
+    steady = 0;
+    if (rt) return true;   // processing starts on the sound card's thread
     if (!p->start_processing(p)) { err = "the plugin did not start processing"; return false; }
     processing = true;
-    steady = 0;
     return true;
+  }
+  // every port's buffers: the main ports carry the audio (set per block),
+  // the others get silence in and a scratch buffer out
+  void layout() {
+    uint32_t nIn = ports ? ports->count(p, true) : 0, nOut = ports ? ports->count(p, false) : 1;
+    scratch.clear();
+    silentIn.clear();
+    bin.assign(nIn, {});
+    bout.assign(std::max<uint32_t>(nOut, 1), {});
+    pin.assign(nIn, {});
+    pout.assign(bout.size(), {});
+    auto take = [&] {
+      scratch.emplace_back(maxFrames, 0.f);
+      return scratch.back().data();
+    };
+    for (uint32_t i = 0; i < nIn; i++) {
+      clap_audio_port_info_t info{};
+      uint32_t ch = ports->get(p, i, true, &info) ? info.channel_count : 0;
+      for (uint32_t c = 0; c < ch; c++) {
+        bool main = i == 0 && c < ins;
+        pin[i].push_back(nullptr);
+        if (!main) silentIn.push_back({i, c});
+      }
+    }
+    for (uint32_t i = 0; i < bout.size(); i++) {
+      uint32_t ch = 2;
+      if (ports) {
+        clap_audio_port_info_t info{};
+        ch = ports->get(p, i, false, &info) ? info.channel_count : 0;
+      }
+      for (uint32_t c = 0; c < ch; c++) pout[i].push_back(nullptr);
+    }
+    // scratch after every vector has its size, so the pointers stay put
+    scratch.reserve(64);
+    for (auto& sc : silentIn) pin[sc.first][sc.second] = take();
+    for (uint32_t i = 0; i < pout.size(); i++)
+      for (uint32_t c = 0; c < pout[i].size(); c++)
+        if (!(i == 0 && c < outs)) pout[i][c] = take();
+    for (uint32_t i = 0; i < nIn; i++) bin[i] = {pin[i].data(), nullptr, uint32_t(pin[i].size()), 0, 0};
+    for (uint32_t i = 0; i < bout.size(); i++) bout[i] = {pout[i].data(), nullptr, uint32_t(pout[i].size()), 0, 0};
+  }
+  void stopProcessing() override {
+    if (processing) p->stop_processing(p);
+    processing = false;
   }
   uint32_t inputs() const override { return ins; }
   uint32_t outputs() const override { return outs; }
@@ -224,8 +292,12 @@ public:
   }
 
   bool process(const float* const* in, float* const* out, uint32_t frames, const std::vector<MidiEvent>& events) override {
-    if (!processing || frames > maxFrames) return false;
-    EventList ev;
+    if (!active || frames > maxFrames) return false;
+    if (!processing) {
+      if (!realtime || !p->start_processing(p)) return false;
+      processing = true;
+    }
+    ev.clear();
     for (auto& m : events) {
       uint32_t t = std::min(m.offset, frames - 1);
       uint8_t kind = m.status & 0xF0, ch = m.status & 0x0F;
@@ -238,60 +310,33 @@ public:
         n.channel = ch;
         n.key = m.d1 & 127;
         n.velocity = (on || kind == 0x80) ? m.d2 / 127.0 : 0.0;
-        ev.push(n);
+        ev.pushNote(n);
       } else {
         clap_event_midi_t x{};
         x.header = {sizeof(x), t, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_MIDI, 0};
         x.port_index = 0;
         x.data[0] = m.status; x.data[1] = m.d1; x.data[2] = m.d2;
-        ev.push(x);
+        ev.pushMidi(x);
       }
     }
     ev.finish();
-    // main ports carry the audio, any other port gets silence in, scratch out
-    uint32_t nIn = ports ? ports->count(p, true) : 0, nOut = ports ? ports->count(p, false) : 1;
-    std::vector<clap_audio_buffer_t> bin(nIn), bout(std::max<uint32_t>(nOut, 1));
-    std::vector<std::vector<float*>> pin(nIn), pout(bout.size());
-    size_t s = 0;
-    auto take = [&](bool silent) {
-      if (s >= scratch.size()) scratch.emplace_back(maxFrames, 0.f);
-      auto* b = scratch[s++].data();
-      if (silent) std::fill(b, b + frames, 0.f);
-      return b;
-    };
-    for (uint32_t i = 0; i < nIn; i++) {
-      clap_audio_port_info_t info{};
-      uint32_t ch = ports->get(p, i, true, &info) ? info.channel_count : 0;
-      for (uint32_t c = 0; c < ch; c++)
-        pin[i].push_back(i == 0 && c < ins ? const_cast<float*>(in[c]) : take(true));
-      bin[i] = {pin[i].data(), nullptr, uint32_t(pin[i].size()), 0, 0};
-    }
-    for (uint32_t i = 0; i < bout.size(); i++) {
-      uint32_t ch = 2;
-      if (ports) {
-        clap_audio_port_info_t info{};
-        ch = ports->get(p, i, false, &info) ? info.channel_count : 0;
-      }
-      for (uint32_t c = 0; c < ch; c++) pout[i].push_back(i == 0 && c < outs ? out[c] : take(false));
-      bout[i] = {pout[i].data(), nullptr, uint32_t(pout[i].size()), 0, 0};
-    }
+    for (auto& sc : silentIn) std::fill(pin[sc.first][sc.second], pin[sc.first][sc.second] + frames, 0.f);
+    if (!pin.empty())
+      for (uint32_t c = 0; c < ins && c < pin[0].size(); c++) pin[0][c] = const_cast<float*>(in[c]);
+    for (uint32_t c = 0; c < outs && c < pout[0].size(); c++) pout[0][c] = out[c];
     clap_process_t pr{};
     pr.steady_time = steady;
     pr.frames_count = frames;
     pr.transport = nullptr;
     pr.audio_inputs = bin.data();
     pr.audio_outputs = bout.data();
-    pr.audio_inputs_count = nIn;
+    pr.audio_inputs_count = uint32_t(bin.size());
     pr.audio_outputs_count = uint32_t(bout.size());
     pr.in_events = &ev.in;
     pr.out_events = &kDropEvents;
     auto status = p->process(p, &pr);
     steady += frames;
-    if (status == CLAP_PROCESS_ERROR) return false;
-    if (status == CLAP_PROCESS_SLEEP || status == CLAP_PROCESS_TAIL) {
-      // the plugin may leave the output alone when it is quiet: clear what it did not mark constant
-    }
-    return true;
+    return status != CLAP_PROCESS_ERROR;
   }
 
   void reset() override {

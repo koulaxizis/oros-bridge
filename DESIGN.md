@@ -95,6 +95,30 @@ native code, so a separate program hosts them and Studio talks to it.
    <img src="asio/logo/asio-compatible-bw.svg" alt="ASIO Compatible" height="72">
 
 
+11. **A plugin live on an input (0.5.0).** To hear yourself through an amp
+   or a reverb while you record, the plugin has to run in the card's own
+   callback: a round trip through the page would add its buffers and its
+   dropouts (decision 1). `liveOpen` opens a **second instance** of the
+   plugin, activated for real time (VST 3 `kRealtime`; CLAP starts and stops
+   processing on the card's thread) at the card's rate, with the state the
+   page gives (the track's plugin, so the live sound is the sound a freeze
+   gives later). Its `process()` runs only on the card's thread; opening,
+   state, its window and closing stay on the main thread (decision 4). The
+   chosen inputs (1 or 2; one input feeds every plugin input) go through it
+   and its sound is added to two outputs from `out` at `gain`, also while no
+   take runs. Nothing on that path allocates or waits: the port layout and
+   the CLAP event storage are made at activation, the VST 3 edit queue is only
+   taken with `try_lock`. Safety: monitoring starts off; the output is clamped
+   to full scale and non-finite samples become silence; a plugin later than
+   the period 8 periods in a row turns itself off (`slow`), a failed
+   `process()` too (`failed`), both shown in `levels`. A take records the
+   inputs **dry** by default (the plugin stays on the track); `record: "wet"`
+   puts the plugin's sound in the take's channels that are its inputs, not
+   moved by its latency (the page gets `latency` and moves them). One live
+   plugin per page; changing it or the card only while stopped. Taking it off
+   waits until the card's thread lets go of it. Instruments come with MIDI
+   read by the bridge (next wave).
+
 ## Protocol (WebSocket, `ws://127.0.0.1:47621/`)
 
 Text messages are JSON. A command carries `op` and an optional `id`; the
@@ -120,11 +144,14 @@ answer repeats the `id` and has `ok` (and `error` when false). Events have
 | `audioPlay` | `frames`, `channels` (0..2), `out` (first output channel) | then `ORP1` blocks fill it |
 | `audioStart` / `audioStop` | | stop: `frames` recorded, `lost` (frames the disk could not keep up with) |
 | `takeRead` | `offset`, `frames` (at most 262144) | an `ORT1` block, then `frames` |
-| `audioClose` | | |
+| `audioClose` | | (also closes the live plugin) |
+| `liveOpen` | `plugin`, `inputs` (1 or 2 card inputs), `out`? (first output), `gain`? (0..4), `on`?, `record`? (`dry` \| `wet`), `state`? (base64) | `h` (for `editor`, `getState`, `setState`, `info`, `close`), `latency` (the plugin's), `monitor` (card + plugin, frames), `inputs`, `outputs`, `editor`, `on`, `record` |
+| `liveSet` | `gain`?, `on`? | `on`, `gain`, `slow`, `failed` |
+| `liveClose` | | |
 
 Events: `hello` {app, version, editors} on connect, `scanning`,
 `editorClosed`, `renderError` {h, seq, error}, `levels` {peaks (one per
-input channel), running, pos}, `audioError` {offset, error} for a bad
+input channel), running, pos, live? {h, on, peak, slow, failed}}, `audioError` {offset, error} for a bad
 `ORP1` block.
 
 Sound to play and takes are binary too:
@@ -165,4 +192,8 @@ Windows, `asio/test_driver.cpp` is a loopback ASIO driver (32-bit integer
 samples, 480 frames of reported and real latency): the test registers it as
 installers do (`HKLM\SOFTWARE\ASIO` and its COM class), checks the
 list, a take within one 32-bit step, the same-card rule and the one-driver
-rule, then removes it. Real cards are tested by hand.
+rule, then removes it. The live test puts the CLAP test gain (latency 32)
+on a loopback input that carries an output back, so the plugin's sound
+returns through the card; a dry and a wet take must match that loop sample
+for sample, and switching it off must give the played sound back; a VST 3 goes
+live too. Real cards are tested by hand.

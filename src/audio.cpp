@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <mutex>
 #include "config.h"
+#include "plugin.h"
 
 namespace ob {
 
@@ -168,6 +169,7 @@ bool AudioEngine::open(AudioBackend& b, const StreamSpec& spec, const std::vecto
 
 void AudioEngine::close() {
   stream_.reset();   // the callback has stopped after this
+  live_ = nullptr;   // the session closes the plugin (it stops processing there)
   running_ = false;
   startReq_ = stopReq_ = false;
   if (writerThread_.joinable()) {
@@ -189,6 +191,15 @@ void AudioEngine::close() {
 }
 
 void AudioEngine::callback(const float* in, uint32_t inCh, float* out, uint32_t outCh, uint32_t frames) {
+  inCallback_.store(true);   // before live_ is read: setLive(nullptr) waits for this to go false
+  LiveFx* fx = live_.load();
+  if (fx && fx->stopReq.load(std::memory_order_acquire)) {
+    if (!fx->stopped.load()) {
+      fx->plugin->stopProcessing();
+      fx->stopped.store(true, std::memory_order_release);
+    }
+    fx = nullptr;
+  }
   if (stopReq_.load(std::memory_order_acquire) && running_.load()) running_ = false;
   if (startReq_.load(std::memory_order_acquire) && !running_.load()) {
     pos_ = 0;
@@ -214,6 +225,9 @@ void AudioEngine::callback(const float* in, uint32_t inCh, float* out, uint32_t 
       if (playCh_ == 1 && playOut_ + 1 < outCh)   // mono: both sides
         for (uint32_t f = 0; f < n; f++) out[size_t(f) * outCh + playOut_ + 1] = out[size_t(f) * outCh + playOut_];
     }
+  }
+  if (fx) runLive(*fx, in, inCh, out, outCh, frames);   // also while stopped: the person hears themselves
+  if (running_.load()) {
     if (!rec_.empty()) {
       uint64_t w = wrote_.load(std::memory_order_relaxed), r = read_.load(std::memory_order_acquire);
       uint64_t room = ringFrames_ - (w - r);
@@ -223,12 +237,121 @@ void AudioEngine::callback(const float* in, uint32_t inCh, float* out, uint32_t 
         float* dst = ring_.data() + size_t((w + f) % ringFrames_) * nr;
         for (size_t k = 0; k < nr; k++) dst[k] = in[size_t(f) * inCh + rec_[k]];
       }
+      // a wet take: the plugin's inputs are recorded as its sound
+      if (fx && fx->wet && !fx->failed.load(std::memory_order_relaxed) && !fx->slow.load(std::memory_order_relaxed)) {
+        const uint32_t po = fx->pluginOuts, cap = uint32_t(wet_.size() / po);
+        for (size_t k = 0; k < nr; k++)
+          for (size_t j = 0; j < fx->inputs.size(); j++) {
+            if (rec_[k] != fx->inputs[j]) continue;
+            uint32_t from = std::min<uint32_t>(uint32_t(j), po - 1);
+            for (uint32_t f = 0; f < n && f < cap; f++)
+              ring_[size_t((w + f) % ringFrames_) * nr + k] = wet_[size_t(f) * po + from];
+          }
+      }
       wrote_.store(w + n, std::memory_order_release);
       if (n < frames) lost_ += frames - n;
     }
     pos_ += frames;
   }
   calls_++;
+  inCallback_.store(false);
+}
+
+void LiveFx::prepare(uint32_t frames, uint32_t ins, uint32_t outs) {
+  maxFrames = frames;
+  pluginIns = ins;
+  pluginOuts = outs;
+  inBuf.assign(ins, std::vector<float>(frames, 0.f));
+  outBuf.assign(outs, std::vector<float>(frames, 0.f));
+  inPtr.clear();
+  outPtr.clear();
+  for (auto& b : inBuf) inPtr.push_back(b.data());
+  for (auto& b : outBuf) outPtr.push_back(b.data());
+}
+
+// On the card's thread: the inputs through the plugin, its sound added to the
+// outputs (when on) and kept for a wet take. Nothing here allocates or waits.
+void AudioEngine::runLive(LiveFx& fx, const float* in, uint32_t inCh, float* out, uint32_t outCh, uint32_t frames) {
+  if (fx.failed.load(std::memory_order_relaxed) || fx.slow.load(std::memory_order_relaxed)) return;
+  static const std::vector<MidiEvent> kNoEvents;
+  const auto t0 = std::chrono::steady_clock::now();
+  const bool on = fx.on.load(std::memory_order_relaxed);
+  const float g = on ? fx.gain.load(std::memory_order_relaxed) : 0.f;
+  const uint32_t po = fx.pluginOuts, cap = uint32_t(wet_.size() / po);
+  float pk = 0.f;
+  for (uint32_t done = 0; done < frames;) {
+    uint32_t n = std::min(fx.maxFrames, frames - done);
+    for (uint32_t c = 0; c < fx.pluginIns; c++) {
+      uint32_t src = fx.inputs[std::min<size_t>(c, fx.inputs.size() - 1)];
+      float* b = fx.inBuf[c].data();
+      if (src < inCh) for (uint32_t f = 0; f < n; f++) b[f] = in[size_t(done + f) * inCh + src];
+      else std::fill(b, b + n, 0.f);
+    }
+    if (!fx.plugin->process(fx.inPtr.data(), fx.outPtr.data(), n, kNoEvents)) {
+      fx.failed = true;
+      return;
+    }
+    for (uint32_t c = 0; c < po; c++) {
+      float* b = fx.outBuf[c].data();
+      for (uint32_t f = 0; f < n; f++)
+        if (!std::isfinite(b[f])) b[f] = 0.f;
+    }
+    for (uint32_t f = 0; f < n; f++) {
+      size_t at = done + f;
+      if (at < cap)
+        for (uint32_t c = 0; c < po; c++) wet_[at * po + c] = fx.outBuf[c][f];
+      if (!on) continue;
+      for (uint32_t k = 0; k < 2; k++) {
+        uint32_t oc = fx.out + k;
+        if (oc >= outCh) break;
+        float v = g * fx.outBuf[std::min(k, po - 1)][f];
+        pk = std::max(pk, std::fabs(v));
+        out[at * outCh + oc] += v;
+      }
+    }
+    done += n;
+  }
+  if (on) {
+    // a plugin that blows up must not hurt: nothing past full scale reaches the card
+    for (size_t i = 0; i < size_t(frames) * outCh; i++) {
+      float v = out[i];
+      out[i] = std::isfinite(v) ? std::clamp(v, -1.f, 1.f) : 0.f;
+    }
+  }
+  if (pk > fx.peak.load(std::memory_order_relaxed)) fx.peak.store(pk, std::memory_order_relaxed);
+  // slower than the card: after a few periods in a row it turns itself off
+  const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  const double period = double(frames) / double(stream_ ? stream_->sampleRate : 48000);
+  fx.late = took > period ? fx.late + 1 : 0;
+  if (fx.late >= kLiveLatePeriods) fx.slow = true;
+}
+
+bool AudioEngine::setLive(LiveFx* fx, std::string& err) {
+  if (!stream_) { err = "no sound card open"; return false; }
+  if (running_ || startReq_) { err = "playing"; return false; }
+  detachLive();
+  if (!fx) return true;
+  wet_.assign(size_t(std::max<uint32_t>(stream_->period * 4, 16384)) * fx->pluginOuts, 0.f);
+  fx->stopReq = false;
+  fx->stopped = false;
+  fx->late = 0;
+  live_.store(fx);
+  return true;
+}
+
+// the plugin stops processing on the card's thread (CLAP wants it there),
+// then the callback lets go of it
+void AudioEngine::detachLive() {
+  LiveFx* old = live_.load();
+  if (!old) return;
+  old->stopReq.store(true, std::memory_order_release);
+  uint64_t c0 = calls_.load();
+  for (int i = 0; i < 200 && !old->stopped.load(std::memory_order_acquire); i++) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    if (i == 40 && calls_.load() == c0) break;   // the card does not call back: nothing to wait for
+  }
+  live_.store(nullptr);
+  while (inCallback_.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
 }
 
 void AudioEngine::writer() {

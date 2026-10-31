@@ -25,6 +25,8 @@ public:
 private:
   nlohmann::json command(const nlohmann::json& m);
   nlohmann::json audioCommand(const std::string& op, const nlohmann::json& m);
+  nlohmann::json liveCommand(const std::string& op, const nlohmann::json& m);
+  void closeLive();   // with audioMu_ held
   void playBlock(const std::vector<uint8_t>& d);
   void meters();
   void reply(const nlohmann::json& m, nlohmann::json out);
@@ -37,11 +39,13 @@ private:
     std::unique_ptr<Plugin> plugin;
     PluginInfo info;
     uint32_t maxFrames = 0;
+    std::unique_ptr<LiveFx> fx;   // live on the card's inputs: processed there, never rendered here
   };
   std::map<int, std::shared_ptr<Open>> open_;
   // the sound card (one per page), and the thread that sends its meters
   std::mutex audioMu_;
   AudioEngine audio_;
+  int liveH_ = 0;                 // the handle of the plugin live on the inputs, 0 = none
   std::thread meterThread_;
   std::atomic<bool> meterQuit_{false};
 };

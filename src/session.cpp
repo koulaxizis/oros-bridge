@@ -109,6 +109,7 @@ nlohmann::json Session::command(const nlohmann::json& m) {
 
   // ----- the sound card -----
   if (op.rfind("audio", 0) == 0 || op == "takeRead") return audioCommand(op, m);
+  if (op.rfind("live", 0) == 0) return liveCommand(op, m);
 
   // ----- open plugins -----
   if (op == "open") {
@@ -125,7 +126,7 @@ nlohmann::json Session::command(const nlohmann::json& m) {
     bool ok = MainLoop::get().call([&] {
       o->plugin = openPlugin(info, err);
       if (!o->plugin) return false;
-      if (!o->plugin->activate(sr, block, err)) { o->plugin.reset(); return false; }
+      if (!o->plugin->activate(sr, block, false, err)) { o->plugin.reset(); return false; }
       return true;
     });
     if (!ok) return fail(err.empty() ? "could not open" : err);
@@ -141,6 +142,8 @@ nlohmann::json Session::command(const nlohmann::json& m) {
   auto it = open_.find(h);
   if (it == open_.end()) return fail("unknown handle");
   auto o = it->second;
+  if (op == "close" && o->fx) return liveCommand("liveClose", m);
+  if (op == "reset" && o->fx) return fail("live: the plugin runs on the sound card");
   if (op == "close") {
     open_.erase(it);
     MainLoop::get().call([&] { o->plugin->closeEditor(); o->plugin.reset(); return 0; });
@@ -220,6 +223,7 @@ nlohmann::json Session::audioCommand(const std::string& op, const nlohmann::json
       }
     }
     std::string err;
+    closeLive();
     if (!audio_.open(*b, spec, rec, err)) return fail(err);
     if (!meterThread_.joinable()) meterThread_ = std::thread([this] { meters(); });
     auto& s = audio_.stream();
@@ -227,6 +231,7 @@ nlohmann::json Session::audioCommand(const std::string& op, const nlohmann::json
             {"outputs", s.outChannels}, {"latency", s.latency}, {"record", rec}};
   }
   if (op == "audioClose") {
+    closeLive();
     audio_.close();
     return {{"ok", true}};
   }
@@ -265,6 +270,110 @@ nlohmann::json Session::audioCommand(const std::string& op, const nlohmann::json
   return fail("unknown op");
 }
 
+// A plugin live on the card's inputs: the person hears themselves through it.
+// A second instance of the plugin, activated for real time at the card's rate;
+// the page gives it the state of the track's plugin. Only while stopped.
+nlohmann::json Session::liveCommand(const std::string& op, const nlohmann::json& m) {
+  std::lock_guard<std::mutex> g(audioMu_);
+  if (op == "liveClose") {
+    closeLive();
+    return {{"ok", true}};
+  }
+  auto it = open_.find(liveH_);
+  if (op == "liveSet") {
+    if (it == open_.end()) return fail("no live plugin");
+    auto& fx = *it->second->fx;
+    if (m.contains("gain")) {
+      double gn = m["gain"].get<double>();
+      if (!(gn >= 0 && gn <= 4)) return fail("bad gain");
+      fx.gain = float(gn);
+    }
+    if (m.contains("on")) fx.on = m["on"].get<bool>();
+    return {{"ok", true}, {"on", fx.on.load()}, {"gain", fx.gain.load()}, {"slow", fx.slow.load()}, {"failed", fx.failed.load()}};
+  }
+  if (op != "liveOpen") return fail("unknown op");
+  if (!audio_.isOpen()) return fail("no sound card open");
+  if (audio_.running()) return fail("playing");
+  const auto& st = audio_.stream();
+  PluginInfo info;
+  if (!cfg_.find(m.value("plugin", ""), info)) return fail("unknown plugin");
+  if (info.instrument) return fail("an instrument plays live from MIDI: not in this version");
+  if (open_.size() >= kMaxOpen) return fail("too many open plugins");
+  std::vector<uint32_t> inputs;
+  if (!m.contains("inputs") || !m["inputs"].is_array() || m["inputs"].empty() || m["inputs"].size() > 2) return fail("bad inputs");
+  for (auto& x : m["inputs"]) {
+    if (!x.is_number_unsigned() || x.get<uint32_t>() >= st.inChannels) return fail("bad inputs");
+    inputs.push_back(x.get<uint32_t>());
+  }
+  uint32_t out = m.value("out", 0u);
+  if (out >= st.outChannels) return fail("bad output");
+  double gain = m.value("gain", 1.0);
+  if (!(gain >= 0 && gain <= 4)) return fail("bad gain");
+  std::string rec = m.value("record", std::string("dry"));
+  if (rec != "dry" && rec != "wet") return fail("bad record");
+  std::vector<uint8_t> state;
+  if (m.contains("state") && !base64Decode(m.value("state", ""), state)) return fail("bad state");
+  closeLive();
+  const uint32_t maxFrames = std::min<uint32_t>(std::max<uint32_t>(st.period, 512), 8192);
+  auto o = std::make_shared<Open>();
+  o->info = info;
+  o->maxFrames = maxFrames;
+  std::string err;
+  bool ok = MainLoop::get().call([&] {
+    o->plugin = openPlugin(info, err);
+    if (!o->plugin) return false;
+    if (!state.empty() && !o->plugin->setState(state)) { err = "the plugin refused the state"; o->plugin.reset(); return false; }
+    if (!o->plugin->activate(double(st.sampleRate), maxFrames, true, err)) { o->plugin.reset(); return false; }
+    if (!o->plugin->inputs()) { err = "the plugin has no audio input"; o->plugin.reset(); return false; }
+    return true;
+  });
+  if (!ok) return fail(err.empty() ? "could not open" : err);
+  auto fx = std::make_unique<LiveFx>();
+  fx->plugin = o->plugin.get();
+  fx->inputs = inputs;
+  fx->out = out;
+  fx->wet = rec == "wet";
+  fx->gain = float(gain);
+  fx->on = m.value("on", false);
+  nlohmann::json res = MainLoop::get().call([&] {
+    fx->prepare(maxFrames, o->plugin->inputs(), o->plugin->outputs());
+    return nlohmann::json{{"latency", o->plugin->latency()}, {"inputs", o->plugin->inputs()}, {"outputs", o->plugin->outputs()},
+                          {"editor", o->plugin->hasEditor()}};
+  });
+  o->fx = std::move(fx);
+  if (!audio_.setLive(o->fx.get(), err)) {
+    MainLoop::get().call([&] { o->plugin.reset(); return 0; });
+    return fail(err);
+  }
+  int h = nextHandle_++;
+  open_[h] = o;
+  liveH_ = h;
+  res["ok"] = true;
+  res["h"] = h;
+  res["monitor"] = st.latency + res["latency"].get<uint32_t>();   // what the person hears, input to output
+  res["on"] = o->fx->on.load();
+  res["record"] = rec;
+  return res;
+}
+
+void Session::closeLive() {
+  if (!liveH_) return;
+  std::string err;
+  audio_.setLive(nullptr, err);   // when stopped; while playing the card keeps it until close
+  auto it = open_.find(liveH_);
+  liveH_ = 0;
+  if (it == open_.end()) return;
+  auto o = it->second;
+  if (audio_.running()) {
+    // never pull a plugin from under a running take: stop first
+    uint64_t f = 0, l = 0;
+    audio_.stop(f, l, err);
+    audio_.setLive(nullptr, err);
+  }
+  open_.erase(it);
+  MainLoop::get().call([&] { o->plugin->closeEditor(); o->plugin.reset(); return 0; });
+}
+
 // Every 100 ms while a card is open: the loudest sample of each input and
 // where the take is, so Studio can show meters before and during a take.
 void Session::meters() {
@@ -275,6 +384,9 @@ void Session::meters() {
       std::lock_guard<std::mutex> g(audioMu_);
       if (!audio_.isOpen()) continue;
       ev = {{"event", "levels"}, {"peaks", audio_.takePeaks()}, {"running", audio_.running()}, {"pos", audio_.position()}};
+      if (auto* fx = audio_.live())
+        ev["live"] = {{"h", liveH_}, {"on", fx->on.load()}, {"peak", fx->peak.exchange(0.f)}, {"slow", fx->slow.load()},
+                      {"failed", fx->failed.load()}};
     }
     conn_.sendText(ev.dump());
   }
@@ -310,6 +422,7 @@ void Session::onBinary(const std::vector<uint8_t>& d) {
   auto it = open_.find(int(h));
   if (it == open_.end()) { error(h, seq, "unknown handle"); return; }
   auto o = it->second;
+  if (o->fx) { error(h, seq, "live: the plugin runs on the sound card"); return; }
   size_t need = 20 + size_t(nev) * 8 + size_t(nch) * frames * 4;
   if (!frames || frames > o->maxFrames || nch > kMaxChannels || d.size() != need) { error(h, seq, "bad block size"); return; }
   std::vector<MidiEvent> events;
