@@ -8,6 +8,7 @@
 #include <vector>
 #include <nlohmann/json.hpp>
 #include "audio.h"
+#include "midi.h"
 #include "config.h"
 #include "plugin.h"
 #include "server.h"
@@ -40,6 +41,7 @@ private:
     PluginInfo info;
     uint32_t maxFrames = 0;
     std::unique_ptr<LiveFx> fx;   // live on the card's inputs: processed there, never rendered here
+    std::unique_ptr<MidiInput> midi;   // the keyboard it plays from (0.6.0)
   };
   std::map<int, std::shared_ptr<Open>> open_;
   // the sound card (one per page), and the thread that sends its meters

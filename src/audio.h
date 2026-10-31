@@ -56,6 +56,8 @@ void enableTestAudio();   // adds the loopback backend (tests only)
 void addAudioModule(const std::string& path);
 
 class Plugin;
+class MidiInput;
+struct MidiEvent;
 
 // ---------- a plugin live on an input (0.5.0) ----------
 // While the card runs, the chosen inputs go through the plugin in the card's
@@ -68,7 +70,8 @@ class Plugin;
 // (not moved by its latency; the page knows it).
 struct LiveFx {
   Plugin* plugin = nullptr;        // owned by the session; process() on the card's thread only
-  std::vector<uint32_t> inputs;    // 1 or 2 card inputs
+  MidiInput* midi = nullptr;       // a keyboard read by the bridge (0.6.0), owned by the session; may be null
+  std::vector<uint32_t> inputs;    // 1 or 2 card inputs (none for an instrument)
   uint32_t out = 0;                // first output channel
   bool wet = false;
   uint32_t maxFrames = 0, pluginIns = 0, pluginOuts = 0;
@@ -82,6 +85,9 @@ struct LiveFx {
   std::vector<std::vector<float>> inBuf, outBuf;
   std::vector<const float*> inPtr;
   std::vector<float*> outPtr;
+  // this period's MIDI, and the part of it in one block (made with room for kMaxEvents)
+  std::vector<MidiEvent> events, blockEvents;
+  int64_t lastNs = 0;              // when the previous period started (places notes inside the period)
   // engine side
   std::atomic<bool> stopReq{false}, stopped{false};
   uint32_t late = 0;               // periods in a row the plugin took longer than the period
@@ -120,10 +126,13 @@ public:
   // Taking it off waits until the card's thread has let go of it.
   bool setLive(LiveFx* fx, std::string& err);
   LiveFx* live() const { return live_.load(); }
+  // the MIDI the live plugin got during the last take: frame (from the take's start), status, data
+  struct MidiTaken { uint64_t frame; uint8_t status, d1, d2; };
+  bool readMidiTake(std::vector<MidiTaken>& out, uint64_t& lost, std::string& err);
 
 private:
   void callback(const float* in, uint32_t inCh, float* out, uint32_t outCh, uint32_t frames);
-  void runLive(LiveFx& fx, const float* in, uint32_t inCh, float* out, uint32_t outCh, uint32_t frames);
+  void runLive(LiveFx& fx, const float* in, uint32_t inCh, float* out, uint32_t outCh, uint32_t frames, bool taking);
   void detachLive();
   void writer();
   std::unique_ptr<AudioStream> stream_;
@@ -147,9 +156,12 @@ private:
   std::atomic<LiveFx*> live_{nullptr};
   std::atomic<bool> inCallback_{false};
   std::vector<float> wet_;           // the plugin's sound per frame, for a wet take (interleaved, pluginOuts)
+  std::vector<MidiTaken> midiTake_;  // written by the card's thread during a take, read after it
+  std::atomic<uint32_t> midiN_{0}, midiLost_{0};
 };
 
 constexpr uint32_t kMaxRecordChannels = 32;
-constexpr uint32_t kLiveLatePeriods = 8;     // a live plugin this many periods late in a row turns off
+constexpr uint32_t kLiveLatePeriods = 8;
+constexpr uint32_t kMaxMidiTake = 1u << 18;    // MIDI messages one take keeps     // a live plugin this many periods late in a row turns off
 constexpr uint64_t kMaxPlayFloats = 1ull << 28;   // 1 GiB of sound to play
 }

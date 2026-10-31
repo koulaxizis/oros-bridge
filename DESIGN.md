@@ -119,6 +119,22 @@ native code, so a separate program hosts them and Studio talks to it.
    waits until the card's thread lets go of it. Instruments come with MIDI
    read by the bridge (next wave).
 
+12. **An instrument live from a MIDI keyboard (0.6.0).** A note that went
+   through the page would arrive with the page's jitter, so the bridge reads
+   the keyboard itself (`src/midi.cpp`): WinMM on Windows, the raw MIDI
+   devices of ALSA (`/dev/snd/midiC*D*`, names from `/proc/asound/cards`) on
+   Linux, no extra library. The port's thread parses bytes into channel
+   messages (running status kept; system exclusive and real-time bytes
+   skipped) and stamps each with the time it came; a lock-free queue hands
+   them to the card's thread, which places each message in the period by
+   when it came during the period before (one period later, without
+   jitter) and gives it to the plugin with the block it falls in. During a
+   take the messages are kept with their frame from the take's start
+   (`midiTake`), so Studio can put the notes on a track. `liveOpen` with
+   `midi` takes an instrument (no inputs) or gives an effect the keyboard
+   too. `--test-audio` adds the keyboard "Test MIDI", played with
+   `midiTest`.
+
 ## Protocol (WebSocket, `ws://127.0.0.1:47621/`)
 
 Text messages are JSON. A command carries `op` and an optional `id`; the
@@ -145,9 +161,12 @@ answer repeats the `id` and has `ok` (and `error` when false). Events have
 | `audioStart` / `audioStop` | | stop: `frames` recorded, `lost` (frames the disk could not keep up with) |
 | `takeRead` | `offset`, `frames` (at most 262144) | an `ORT1` block, then `frames` |
 | `audioClose` | | (also closes the live plugin) |
-| `liveOpen` | `plugin`, `inputs` (1 or 2 card inputs), `out`? (first output), `gain`? (0..4), `on`?, `record`? (`dry` \| `wet`), `state`? (base64) | `h` (for `editor`, `getState`, `setState`, `info`, `close`), `latency` (the plugin's), `monitor` (card + plugin, frames), `inputs`, `outputs`, `editor`, `on`, `record` |
+| `midiDevices` | | `inputs`: [names] |
+| `liveOpen` | `plugin`, `inputs` (1 or 2 card inputs; none for an instrument), `midi`? (a keyboard's name; needed by an instrument), `out`? (first output), `gain`? (0..4), `on`?, `record`? (`dry` \| `wet`), `state`? (base64) | `h` (for `editor`, `getState`, `setState`, `info`, `close`), `latency` (the plugin's), `monitor` (card + plugin, frames), `inputs`, `outputs`, `editor`, `on`, `record` |
 | `liveSet` | `gain`?, `on`? | `on`, `gain`, `slow`, `failed` |
 | `liveClose` | | |
+| `midiTake` | | `events`: [[frame, status, data1, data2]] the live plugin got during the last take, `lost` |
+| `midiTest` | `bytes` | the test keyboard plays them (`--test-audio`) |
 
 Events: `hello` {app, version, editors} on connect, `scanning`,
 `editorClosed`, `renderError` {h, seq, error}, `levels` {peaks (one per
@@ -196,4 +215,7 @@ rule, then removes it. The live test puts the CLAP test gain (latency 32)
 on a loopback input that carries an output back, so the plugin's sound
 returns through the card; a dry and a wet take must match that loop sample
 for sample, and switching it off must give the played sound back; a VST 3 goes
-live too. Real cards are tested by hand.
+live too. The live instrument test plays the CLAP test sine from the test
+keyboard during a take: silence before the note, the sine while it is held
+(starting within a frame of where `midiTake` puts the note), silence after.
+Real cards and keyboards are tested by hand.

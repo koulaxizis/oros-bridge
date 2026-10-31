@@ -1,7 +1,7 @@
 # orOS Bridge: hosts the person's own VST3 and CLAP plugins for orOS Studio,
 # on this computer only (127.0.0.1). See DESIGN.md.
 cmake_minimum_required(VERSION 3.28)
-project(oros_bridge VERSION 0.5.0 LANGUAGES C CXX)
+project(oros_bridge VERSION 0.6.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -73,6 +73,7 @@ add_library(bridge_core STATIC
   src/audio.cpp
   src/audio_ma.cpp
   src/audio_module.cpp
+  src/midi.cpp
 )
 # the SDK's hosting library leaves these to the host
 set(VST3_SRC ${vst3sdk_SOURCE_DIR})
@@ -90,7 +91,7 @@ target_include_directories(bridge_core PUBLIC src)
 target_link_libraries(bridge_core PUBLIC clap nlohmann_json::nlohmann_json sdk_hosting oros_miniaudio)
 target_compile_definitions(bridge_core PUBLIC OROS_BRIDGE_VERSION="${PROJECT_VERSION}")
 if(WIN32)
-  target_link_libraries(bridge_core PUBLIC ws2_32 bcrypt shell32 ole32 user32)
+  target_link_libraries(bridge_core PUBLIC ws2_32 bcrypt shell32 ole32 user32 winmm)
   target_compile_definitions(bridge_core PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
 else()
   find_package(Threads REQUIRED)

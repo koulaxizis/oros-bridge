@@ -109,7 +109,7 @@ nlohmann::json Session::command(const nlohmann::json& m) {
 
   // ----- the sound card -----
   if (op.rfind("audio", 0) == 0 || op == "takeRead") return audioCommand(op, m);
-  if (op.rfind("live", 0) == 0) return liveCommand(op, m);
+  if (op.rfind("live", 0) == 0 || op.rfind("midi", 0) == 0) return liveCommand(op, m);
 
   // ----- open plugins -----
   if (op == "open") {
@@ -279,7 +279,23 @@ nlohmann::json Session::liveCommand(const std::string& op, const nlohmann::json&
     closeLive();
     return {{"ok", true}};
   }
+  if (op == "midiDevices") return {{"ok", true}, {"inputs", midiInputs()}};
   auto it = open_.find(liveH_);
+  if (op == "midiTake") {
+    std::vector<AudioEngine::MidiTaken> ev;
+    uint64_t lost = 0;
+    std::string err;
+    if (!audio_.readMidiTake(ev, lost, err)) return fail(err);
+    auto list = nlohmann::json::array();
+    for (auto& e : ev) list.push_back({e.frame, e.status, e.d1, e.d2});
+    return {{"ok", true}, {"events", list}, {"lost", lost}};
+  }
+  if (op == "midiTest") {   // the test keyboard (--test-audio): bytes as if played
+    if (it == open_.end() || !it->second->midi) return fail("no live keyboard");
+    std::vector<uint8_t> b;
+    for (auto& x : m.value("bytes", nlohmann::json::array())) b.push_back(uint8_t(x.get<uint32_t>()));
+    return it->second->midi->inject(b) ? nlohmann::json{{"ok", true}} : fail("not the test keyboard");
+  }
   if (op == "liveSet") {
     if (it == open_.end()) return fail("no live plugin");
     auto& fx = *it->second->fx;
@@ -297,11 +313,13 @@ nlohmann::json Session::liveCommand(const std::string& op, const nlohmann::json&
   const auto& st = audio_.stream();
   PluginInfo info;
   if (!cfg_.find(m.value("plugin", ""), info)) return fail("unknown plugin");
-  if (info.instrument) return fail("an instrument plays live from MIDI: not in this version");
+  std::string midiName = m.value("midi", std::string());
+  if (info.instrument && midiName.empty()) return fail("an instrument plays live from a MIDI keyboard: choose one");
   if (open_.size() >= kMaxOpen) return fail("too many open plugins");
   std::vector<uint32_t> inputs;
-  if (!m.contains("inputs") || !m["inputs"].is_array() || m["inputs"].empty() || m["inputs"].size() > 2) return fail("bad inputs");
-  for (auto& x : m["inputs"]) {
+  auto jin = m.value("inputs", nlohmann::json::array());
+  if (!jin.is_array() || jin.size() > 2 || (jin.empty() && !info.instrument)) return fail("bad inputs");
+  for (auto& x : jin) {
     if (!x.is_number_unsigned() || x.get<uint32_t>() >= st.inChannels) return fail("bad inputs");
     inputs.push_back(x.get<uint32_t>());
   }
@@ -314,6 +332,12 @@ nlohmann::json Session::liveCommand(const std::string& op, const nlohmann::json&
   std::vector<uint8_t> state;
   if (m.contains("state") && !base64Decode(m.value("state", ""), state)) return fail("bad state");
   closeLive();
+  std::unique_ptr<MidiInput> midiIn;
+  if (!midiName.empty()) {
+    std::string merr;
+    midiIn = openMidiInput(midiName, merr);
+    if (!midiIn) return fail(merr);
+  }
   const uint32_t maxFrames = std::min<uint32_t>(std::max<uint32_t>(st.period, 512), 8192);
   auto o = std::make_shared<Open>();
   o->info = info;
@@ -324,13 +348,15 @@ nlohmann::json Session::liveCommand(const std::string& op, const nlohmann::json&
     if (!o->plugin) return false;
     if (!state.empty() && !o->plugin->setState(state)) { err = "the plugin refused the state"; o->plugin.reset(); return false; }
     if (!o->plugin->activate(double(st.sampleRate), maxFrames, true, err)) { o->plugin.reset(); return false; }
-    if (!o->plugin->inputs()) { err = "the plugin has no audio input"; o->plugin.reset(); return false; }
+    if (!o->plugin->inputs() && !info.instrument) { err = "the plugin has no audio input"; o->plugin.reset(); return false; }
     return true;
   });
   if (!ok) return fail(err.empty() ? "could not open" : err);
   auto fx = std::make_unique<LiveFx>();
   fx->plugin = o->plugin.get();
-  fx->inputs = inputs;
+  fx->midi = midiIn.get();
+  o->midi = std::move(midiIn);
+  fx->inputs = info.instrument ? std::vector<uint32_t>() : inputs;
   fx->out = out;
   fx->wet = rec == "wet";
   fx->gain = float(gain);
@@ -353,6 +379,8 @@ nlohmann::json Session::liveCommand(const std::string& op, const nlohmann::json&
   res["monitor"] = st.latency + res["latency"].get<uint32_t>();   // what the person hears, input to output
   res["on"] = o->fx->on.load();
   res["record"] = rec;
+  res["instrument"] = info.instrument;
+  res["midi"] = midiName;
   return res;
 }
 
