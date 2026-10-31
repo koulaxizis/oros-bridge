@@ -65,7 +65,16 @@ public:
   }
 };
 
-class Frame : public U::ImplementsNonDestroyable<U::Directly<IPlugFrame>> {
+#ifdef _WIN32
+const FIDString kPlatform = kPlatformTypeHWND;
+using FrameBase = U::ImplementsNonDestroyable<U::Directly<IPlugFrame>>;
+#else
+const FIDString kPlatform = kPlatformTypeX11EmbedWindowID;
+// Linux has no shared event loop, so the frame also lends the plugin ours (IRunLoop)
+using FrameBase = U::ImplementsNonDestroyable<U::Directly<IPlugFrame, Linux::IRunLoop>>;
+#endif
+
+class Frame : public FrameBase {
 public:
   EditorWindow* win = nullptr;
   IPlugView* view = nullptr;
@@ -75,6 +84,51 @@ public:
     if (v) v->onSize(r);
     return kResultTrue;
   }
+#ifndef _WIN32
+  // what the plugin asked the loop for; all of it goes when the editor closes
+  std::vector<std::pair<Linux::IEventHandler*, int>> handlers;
+  std::vector<std::pair<Linux::ITimerHandler*, int>> timers;
+  tresult PLUGIN_API registerEventHandler(Linux::IEventHandler* h, Linux::FileDescriptor fd) override {
+    if (!h) return kInvalidArgument;
+    int id = MainLoop::get().addFd(fd, POLLIN, [h](int f, short) { h->onFDIsSet(f); });
+    handlers.push_back({h, id});
+    return kResultTrue;
+  }
+  tresult PLUGIN_API unregisterEventHandler(Linux::IEventHandler* h) override {
+    bool found = false;
+    for (auto it = handlers.begin(); it != handlers.end();) {
+      if (it->first != h) { ++it; continue; }
+      MainLoop::get().removeFd(it->second);
+      it = handlers.erase(it);
+      found = true;
+    }
+    return found ? kResultTrue : kInvalidArgument;
+  }
+  tresult PLUGIN_API registerTimer(Linux::ITimerHandler* h, Linux::TimerInterval ms) override {
+    if (!h) return kInvalidArgument;
+    int id = MainLoop::get().addTimer(int(std::min<Linux::TimerInterval>(ms, 60000)), [h] { h->onTimer(); });
+    timers.push_back({h, id});
+    return kResultTrue;
+  }
+  tresult PLUGIN_API unregisterTimer(Linux::ITimerHandler* h) override {
+    bool found = false;
+    for (auto it = timers.begin(); it != timers.end();) {
+      if (it->first != h) { ++it; continue; }
+      MainLoop::get().removeTimer(it->second);
+      it = timers.erase(it);
+      found = true;
+    }
+    return found ? kResultTrue : kInvalidArgument;
+  }
+  void releaseAll() {
+    for (auto& e : handlers) MainLoop::get().removeFd(e.second);
+    for (auto& e : timers) MainLoop::get().removeTimer(e.second);
+    handlers.clear();
+    timers.clear();
+  }
+#else
+  void releaseAll() {}
+#endif
 };
 
 class Vst3Plugin : public Plugin {
@@ -306,20 +360,16 @@ public:
   }
 
   bool hasEditor() override {
-#ifdef _WIN32
-    if (!controller) return false;
+    if (!controller || !EditorWindow::supported()) return false;
     IPtr<IPlugView> v = owned(controller->createView(ViewType::kEditor));
-    return v && v->isPlatformTypeSupported(kPlatformTypeHWND) == kResultTrue;
-#else
-    return false;
-#endif
+    return v && v->isPlatformTypeSupported(kPlatform) == kResultTrue;
   }
   bool openEditor(const std::string& title, std::function<void()> onClosed, std::string& err) override {
     if (view) { if (win) win->show(); return true; }
-#ifdef _WIN32
     if (!controller) { err = "this plugin has no window"; return false; }
+    if (!EditorWindow::supported()) { err = "plugin windows need a desktop here"; return false; }
     view = owned(controller->createView(ViewType::kEditor));
-    if (!view || view->isPlatformTypeSupported(kPlatformTypeHWND) != kResultTrue) { view = nullptr; err = "this plugin has no window here"; return false; }
+    if (!view || view->isPlatformTypeSupported(kPlatform) != kResultTrue) { view = nullptr; err = "this plugin has no window here"; return false; }
     ViewRect r{};
     view->getSize(&r);
     onEditorClosed = std::move(onClosed);
@@ -334,20 +384,18 @@ public:
     frame.win = win.get();
     frame.view = view;
     view->setFrame(&frame);
-    if (view->attached(win->nativeHandle(), kPlatformTypeHWND) != kResultTrue) {
+    if (view->attached(win->nativeHandle(), kPlatform) != kResultTrue) {
       view->setFrame(nullptr);
       view = nullptr;
+      frame.releaseAll();
+      frame.win = nullptr;
+      frame.view = nullptr;
       win.reset();
       err = "the plugin window could not be placed";
       return false;
     }
     win->show();
     return true;
-#else
-    (void)title; (void)onClosed;
-    err = "plugin windows are Windows only for now";
-    return false;
-#endif
   }
   void editorClosedByPerson() {
     auto cb = onEditorClosed;
@@ -360,6 +408,7 @@ public:
       view->setFrame(nullptr);
       view = nullptr;
     }
+    frame.releaseAll();
     frame.win = nullptr;
     frame.view = nullptr;
     win.reset();

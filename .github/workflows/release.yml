@@ -67,12 +67,14 @@ jobs:
           node-version: 22
       - name: CMake 3.28+
         run: pip install --user "cmake>=3.28,<4" && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: X11 headers and Xvfb
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libx11-dev xvfb
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - name: Build
         run: cmake --build build --parallel
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure && xvfb-run -a ctest --test-dir build --output-on-failure
       - name: Package and add to the draft
         env:
           GH_TOKEN: ${{ github.token }}
