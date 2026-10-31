@@ -24,7 +24,9 @@ test.before(async () => {
   assert.ok(BRIDGE && PLUGINS, "set OROS_BRIDGE and OROS_TEST_PLUGINS");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "oros-bridge-"));
   fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify({ folders: [PLUGINS] }));
-  proc = spawn(BRIDGE, ["--console", "--port", "0", "--config-dir", dir, "--allow-origin", ORIGIN, "--test-audio"], { stdio: ["ignore", "pipe", "inherit"] });
+  const args = ["--console", "--port", "0", "--config-dir", dir, "--allow-origin", ORIGIN, "--test-audio"];
+  if (process.env.OROS_TEST_AUDIO_MODULE) args.push("--audio-module", process.env.OROS_TEST_AUDIO_MODULE);
+  proc = spawn(BRIDGE, args, { stdio: ["ignore", "pipe", "inherit"] });
   await new Promise((res, rej) => {
     proc.on("exit", (c) => rej(new Error("bridge exited " + c)));
     proc.stdout.on("data", (d) => {
@@ -332,7 +334,7 @@ test("sound card: the backends, the loopback card listed first", async () => {
   assert.equal(r.backends[0].id, "test");
   assert.deepEqual(r.backends[0].inputs, [{ name: "Loopback", channels: 4, default: true }]);
   const ids = r.backends.map((b) => b.id);
-  if (IS_WIN) assert.ok(ids.includes("wasapi"));
+  if (IS_WIN) for (const id of ["wasapi", "asio"]) assert.ok(ids.includes(id), id);   // asio: oros-bridge-asio.dll beside the exe
   else if (process.platform === "linux") for (const id of ["jack", "pulse", "alsa"]) assert.ok(ids.includes(id), id);
   for (const b of r.backends) assert.ok(b.ok === true || typeof b.error === "string", b.id);
   c.close();
@@ -403,5 +405,92 @@ test("sound card: bad requests are refused", async () => {
   c.close();   // closing the page closes the card
   const c2 = await paired();
   assert.equal((await c2.cmd({ op: "audioOpen", backend: "test", record: [0] })).ok, true);
+  c2.close();
+});
+
+// ---- a sound system from a separate library (src/audio_module.h) ----
+// the test module: input 1/2 = output 1/2 100 frames later, input 3 = output 2 at a quarter
+async function lineUp(c, open, { delay, inputs, check }) {
+  const o = await c.cmd(Object.assign({ op: "audioOpen" }, open));
+  assert.equal(o.ok, true, o.error);
+  assert.equal(o.inputs, inputs);
+  assert.equal(o.latency, delay);
+  const N = 9000, L = ramp(N), R = ramp(N, -0.5);
+  assert.equal((await c.cmd({ op: "audioPlay", frames: N, channels: 2, out: 0 })).ok, true);
+  for (let at = 0; at < N; at += 4000) c.send(playBlock(at, [L.slice(at, at + 4000), R.slice(at, at + 4000)]), 2);
+  assert.equal((await c.cmd({ op: "audioStart" })).ok, true);
+  await sleep(600);
+  const s = await c.cmd({ op: "audioStop" });
+  assert.equal(s.ok, true, s.error);
+  assert.equal(s.lost, 0);
+  const n = delay + N + 100;
+  assert.ok(s.frames >= n, "recorded " + s.frames);
+  const { bin } = await c.take({ offset: 0, frames: n });
+  const at = (ch, i) => bin.readFloatLE(16 + (ch * n + i) * 4);
+  for (let i = 0; i < delay; i++) assert.equal(at(0, i), 0);
+  for (let i = 0; i < N; i++) check(at(0, delay + i), L[i], at(1, delay + i), R[i], i);
+  for (let i = delay + N; i < n; i++) assert.equal(at(0, i), 0, "silence after the end");
+  assert.equal((await c.cmd({ op: "audioClose" })).ok, true);
+}
+
+test("audio module: offered as a backend, a take lines up sample for sample", { skip: !process.env.OROS_TEST_AUDIO_MODULE }, async () => {
+  const c = await paired();
+  const r = await c.cmd({ op: "audioDevices" });
+  const m = r.backends.find((b) => b.id === "modtest");
+  assert.ok(m, "the module's backend is listed");
+  assert.equal(m.label, "Module loopback (test)");
+  assert.equal(m.ok, true);
+  assert.deepEqual(m.inputs, [{ name: "Module loopback", channels: 3, default: true }]);
+  assert.equal((await c.cmd({ op: "audioOpen", backend: "modtest", input: "Other" })).error, "no such card: Other");
+  await lineUp(c, { backend: "modtest", sr: 44100, period: 64, record: [0, 2] }, {
+    delay: 100, inputs: 3,
+    check: (a, l, b, rr, i) => { assert.equal(a, l, "input 1 at " + i); assert.equal(b, Math.fround(rr * 0.25), "input 3 at " + i); },
+  });
+  c.close();
+});
+
+// ---- ASIO (Windows): oros-bridge-asio.dll with the loopback driver asio/test_driver.cpp ----
+// The driver is registered the way installers do (HKLM\SOFTWARE\ASIO + its COM class), which needs
+// an administrator: CI runs as one, elsewhere the test is skipped.
+const ASIO_DRIVER = process.env.OROS_TEST_ASIO_DRIVER;
+const ASIO_CLSID = "{F20028E5-5EE8-4D40-AE0B-AB0066A32676}";
+const ASIO_KEY = "HKLM\\SOFTWARE\\ASIO\\orOS Test ASIO";
+const COM_KEY = "HKLM\\Software\\Classes\\CLSID\\" + ASIO_CLSID;
+function reg(args) {
+  return require("node:child_process").spawnSync("reg", args, { encoding: "utf8" }).status === 0;
+}
+
+test("ASIO: the loopback driver is listed, a take lines up with what was played", { skip: !(IS_WIN && ASIO_DRIVER) }, async (t) => {
+  if (!reg(["add", ASIO_KEY, "/v", "CLSID", "/d", ASIO_CLSID, "/f"])) { t.skip("not an administrator"); return; }
+  t.after(() => { reg(["delete", ASIO_KEY, "/f"]); reg(["delete", COM_KEY, "/f"]); });
+  assert.ok(reg(["add", ASIO_KEY, "/v", "Description", "/d", "orOS Test ASIO", "/f"]));
+  assert.ok(reg(["add", COM_KEY + "\\InprocServer32", "/ve", "/d", ASIO_DRIVER, "/f"]));
+  assert.ok(reg(["add", COM_KEY + "\\InprocServer32", "/v", "ThreadingModel", "/d", "Apartment", "/f"]));
+  const c = await paired();
+  const r = await c.cmd({ op: "audioDevices" });
+  const a = r.backends.find((b) => b.id === "asio");
+  assert.equal(a.ok, true, a.error);
+  assert.equal(a.label, "ASIO");
+  const card = a.inputs.find((d) => d.name === "orOS Test ASIO");
+  assert.ok(card, JSON.stringify(a.inputs));
+  assert.equal(card.channels, 4);
+  assert.equal(a.outputs.find((d) => d.name === "orOS Test ASIO").channels, 2);
+  assert.match((await c.cmd({ op: "audioOpen", backend: "asio", input: "orOS Test ASIO", output: "Other" })).error, /same card/);
+  assert.match((await c.cmd({ op: "audioOpen", backend: "asio", input: "No such" })).error, /no such ASIO driver/);
+  // 32-bit integer samples there and back: within one step of 2^-31
+  const near = (x, y, what) => assert.ok(Math.abs(x - y) < 1e-6, what + ": " + x + " vs " + y);
+  await lineUp(c, { backend: "asio", input: "orOS Test ASIO", output: "orOS Test ASIO", sr: 48000, record: [0, 3] }, {
+    delay: 480, inputs: 4,
+    check: (x, l, y, rr, i) => { near(x, l, "input 1 at " + i); near(y, rr * 0.5, "input 4 at " + i); },
+  });
+  // one driver per process: a second page waits until the first closes
+  assert.equal((await c.cmd({ op: "audioOpen", backend: "asio", input: "orOS Test ASIO", record: [0] })).ok, true);
+  const c2 = await paired();
+  assert.match((await c2.cmd({ op: "audioOpen", backend: "asio", input: "orOS Test ASIO" })).error, /already in use/);
+  const again = (await c2.cmd({ op: "audioDevices" })).backends.find((b) => b.id === "asio");
+  assert.ok(again.inputs.some((d) => d.name === "orOS Test ASIO"), "the list stays while a card is open");
+  c.close();
+  await sleep(300);
+  assert.equal((await c2.cmd({ op: "audioOpen", backend: "asio", input: "orOS Test ASIO" })).ok, true);
   c2.close();
 });

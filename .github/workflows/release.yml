@@ -1,6 +1,7 @@
 # A release of orOS Bridge for Windows (and Linux x64 since 0.3.0), started by hand (Actions → release →
 # Run workflow). It builds and tests like build.yml and leaves a DRAFT
-# release with the exe, a zip (exe + README, LICENSE, THIRD_PARTY) and their
+# release with the exe, a zip (exe, the GPLv3 ASIO module oros-bridge-asio.dll, README, LICENSE,
+# THIRD_PARTY), the ASIO module on its own and their
 # SHA-256 sums; the owner tries it and publishes it. Asset names do not
 # change between versions, so
 # https://github.com/koulaxizis/oros-bridge/releases/latest/download/oros-bridge-windows-x64.exe
@@ -32,7 +33,10 @@ jobs:
           "TAG=v$v" | Out-File -Append $env:GITHUB_ENV
           New-Item -ItemType Directory out, zip | Out-Null
           Copy-Item build/Release/oros-bridge.exe out/oros-bridge-windows-x64.exe
-          Copy-Item build/Release/oros-bridge.exe, README.md, LICENSE, THIRD_PARTY.md zip/
+          # the ASIO module (GPLv3): beside the exe in the zip, and on its own for people who took the exe
+          Copy-Item build/Release/oros-bridge-asio.dll out/
+          Copy-Item build/Release/oros-bridge.exe, build/Release/oros-bridge-asio.dll, README.md, LICENSE, THIRD_PARTY.md zip/
+          Copy-Item asio/LICENSE zip/LICENSE-asio.txt
           Compress-Archive -Path zip/* -DestinationPath out/oros-bridge-windows-x64.zip
           $sums = Get-ChildItem out -File | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" }
           $sums | Out-File -Encoding ascii out/SHA256SUMS.txt
@@ -46,7 +50,7 @@ jobs:
             gh release upload "$TAG" out/* --clobber
           else
             gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "orOS Bridge ${TAG#v}" \
-              --notes "Windows x64: download oros-bridge-windows-x64.exe, run it and keep its window open while you use orOS Studio (Studio → a track's settings → Plugin on this computer). The exe is not signed yet: Windows SmartScreen may ask once (More info → Run anyway). Linux x64: oros-bridge-linux-x64.tar.gz, run ./oros-bridge in a terminal. Record through your sound card: Studio → Settings → Sound card → orOS Bridge. SHA-256 sums in SHA256SUMS.txt. Free, MIT." \
+              --notes "Windows x64: download oros-bridge-windows-x64.exe, run it and keep its window open while you use orOS Studio (Studio → a track's settings → Plugin on this computer). ASIO: oros-bridge-asio.dll goes next to the exe (the zip has both); it is GPLv3, source in asio/. ASIO is a registered trademark of Steinberg Media Technologies GmbH. The exe is not signed yet: Windows SmartScreen may ask once (More info → Run anyway). Linux x64: oros-bridge-linux-x64.tar.gz, run ./oros-bridge in a terminal. Record through your sound card: Studio → Settings → Sound card → orOS Bridge. SHA-256 sums in SHA256SUMS.txt. Free, MIT." \
               out/*
           fi
   # Linux x64 (0.3.0, the sound card: JACK, PipeWire/PulseAudio, ALSA): a

@@ -97,7 +97,12 @@ std::string wsAccept(const std::string& key) {
 namespace {
 bool sendAll(intptr_t s, const uint8_t* p, size_t n) {
   while (n) {
-    int k = ::send((decltype(socket(0, 0, 0)))s, (const char*)p, int(std::min<size_t>(n, 1 << 20)), 0);
+#ifdef MSG_NOSIGNAL
+    constexpr int kFlags = MSG_NOSIGNAL;   // a page that went away is an error here, not SIGPIPE
+#else
+    constexpr int kFlags = 0;
+#endif
+    int k = ::send((decltype(socket(0, 0, 0)))s, (const char*)p, int(std::min<size_t>(n, 1 << 20)), kFlags);
     if (k <= 0) return false;
     p += k;
     n -= size_t(k);

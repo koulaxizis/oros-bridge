@@ -30,7 +30,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory dist | Out-Null
-          Copy-Item build/Release/oros-bridge.exe dist/
+          Copy-Item build/Release/oros-bridge.exe, build/Release/oros-bridge-asio.dll dist/
+          Copy-Item asio/LICENSE dist/LICENSE-asio.txt
           Copy-Item README.md, LICENSE, THIRD_PARTY.md dist/
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows'

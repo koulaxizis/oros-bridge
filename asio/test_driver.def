@@ -1,0 +1,4 @@
+LIBRARY oros-test-asio
+EXPORTS
+  DllGetClassObject PRIVATE
+  DllCanUnloadNow PRIVATE
