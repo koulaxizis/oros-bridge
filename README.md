@@ -33,7 +33,22 @@ Windows Audio (WASAPI, with exclusive mode for the lowest delay), JACK,
 PipeWire/PulseAudio or ALSA. Studio then records through the bridge: every
 input you pick goes to its own track, in step with what you hear, even when
 the computer is busy. Listen through your card's own monitoring (direct
-monitor). ASIO comes later as a separate module.
+monitor).
+
+### ASIO® (0.4.0, Windows)
+
+<img src="asio/logo/asio-compatible-bw.svg" alt="ASIO Compatible" height="72">
+
+If your card has an ASIO driver, put `oros-bridge-asio.dll` next to
+`oros-bridge.exe` (the Windows zip has both) and choose `ASIO` in Studio. One
+card both records and plays, at the buffer size set in the driver's own
+control panel, so pick the same card for input and output. Only one program
+page at a time can use ASIO. `oros-bridge-asio.dll` is a separate program
+under the GPLv3 (its source and licence are in [asio/](asio/)), built with
+the Steinberg ASIO SDK under the SDK's GPLv3 licence; without it the bridge is
+MIT and offers everything else.
+
+ASIO is a registered trademark of Steinberg Media Technologies GmbH.
 
 The window's `Forget paired browsers` (or `oros-bridge --forget-pairings`)
 forgets every browser you paired. `oros-bridge --scan` lists the plugins it
@@ -57,6 +72,8 @@ cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-CMake 3.28+, a C++17 compiler, Node 22 for the tests. The VST 3 SDK, CLAP and
-nlohmann/json are fetched at configure time (see THIRD_PARTY.md). How it works:
+CMake 3.28+, a C++17 compiler, Node 22 for the tests. The VST 3 SDK, CLAP,
+nlohmann/json, miniaudio and, on Windows, the ASIO SDK are fetched at
+configure time (see THIRD_PARTY.md). `-DOROS_BRIDGE_ASIO=OFF` leaves out the
+GPLv3 ASIO module. How it works:
 [DESIGN.md](DESIGN.md).

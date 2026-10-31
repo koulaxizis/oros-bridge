@@ -13,8 +13,8 @@ namespace ob {
 
 // ---------- the sound card ----------
 // A backend is one way of reaching sound cards: WASAPI on Windows; JACK,
-// PulseAudio/PipeWire and ALSA on Linux (miniaudio, audio_ma.cpp). A later
-// ASIO module adds itself as one more backend. "test" is a loopback card for
+// PulseAudio/PipeWire and ALSA on Linux (miniaudio, audio_ma.cpp). A separate
+// library can add one more (audio_module.h): the ASIO module, asio/. "test" is a loopback card for
 // the tests (--test-audio).
 
 // One period of sound: `in` holds inCh interleaved floats per frame, `out`
@@ -52,6 +52,8 @@ public:
 std::vector<AudioBackend*> audioBackends();
 AudioBackend* findAudioBackend(const std::string& id);
 void enableTestAudio();   // adds the loopback backend (tests only)
+// also offer the sound system in this library (audio_module.h); before the first audioBackends()
+void addAudioModule(const std::string& path);
 
 // ---------- a take ----------
 // One open card for one page: it plays what the page sent (prepared ahead,

@@ -28,7 +28,8 @@ static const char* kUsage =
     "  --config-dir DIR            keep settings in DIR\n"
     "  --scan                      look for plugins, print them, exit\n"
     "  --forget-pairings           forget every paired browser, exit\n"
-    "  --test-audio                also offer a loopback sound card (tests)\n";
+    "  --test-audio                also offer a loopback sound card (tests)\n"
+    "  --audio-module PATH         also offer the sound system in this library\n";
 
 #ifdef _WIN32
 // The program is built as a window program, so it has no console of its own.
@@ -45,6 +46,9 @@ static void useConsole() {
 #endif
 
 int main(int argc, char** argv) {
+#ifdef SIGPIPE
+  std::signal(SIGPIPE, SIG_IGN);   // a page that went away is a send error, not the end (macOS has no MSG_NOSIGNAL)
+#endif
   ServerOptions opt;
   opt.origins = {"https://useoros.online", "https://www.useoros.online"};
   std::string dir = Config::defaultDir();
@@ -68,6 +72,7 @@ int main(int argc, char** argv) {
     else if (a == "--console") console = true;
     else if (a == "--tray") tray = true;
     else if (a == "--test-audio") enableTestAudio();
+    else if (a == "--audio-module") addAudioModule(next());
     else if (a == "--help" || a == "-h") { console = true; help = true; }
     else { unknown = a; break; }
   }

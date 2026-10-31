@@ -1,7 +1,7 @@
 # orOS Bridge: hosts the person's own VST3 and CLAP plugins for orOS Studio,
 # on this computer only (127.0.0.1). See DESIGN.md.
 cmake_minimum_required(VERSION 3.28)
-project(oros_bridge VERSION 0.3.0 LANGUAGES C CXX)
+project(oros_bridge VERSION 0.4.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -12,6 +12,8 @@ if(MSVC)
 endif()
 
 option(OROS_BRIDGE_TESTS "Build the test plugins and the protocol test" ON)
+# the ASIO module is GPLv3 (asio/LICENSE) and a separate dll; the bridge stays MIT without it
+option(OROS_BRIDGE_ASIO "Build oros-bridge-asio.dll (Windows, GPLv3)" ON)
 
 include(FetchContent)
 # CLAP 1.2.9 (MIT)
@@ -70,6 +72,7 @@ add_library(bridge_core STATIC
   src/editor.cpp
   src/audio.cpp
   src/audio_ma.cpp
+  src/audio_module.cpp
 )
 # the SDK's hosting library leaves these to the host
 set(VST3_SRC ${vst3sdk_SOURCE_DIR})
@@ -110,6 +113,10 @@ if(WIN32)
   endif()
 else()
   target_sources(oros-bridge PRIVATE src/gui_none.cpp)
+endif()
+
+if(WIN32 AND OROS_BRIDGE_ASIO)
+  add_subdirectory(asio)
 endif()
 
 if(OROS_BRIDGE_TESTS)

@@ -10,6 +10,7 @@
 namespace ob {
 
 std::vector<std::unique_ptr<AudioBackend>> makeSystemBackends();   // audio_ma.cpp
+std::vector<std::unique_ptr<AudioBackend>> makeModuleBackends();   // audio_module.cpp
 
 // ---------- the loopback card (tests) ----------
 // 4 inputs, 2 outputs: input 1/2 is output 1/2 again kLoopDelay frames
@@ -90,6 +91,11 @@ std::vector<std::unique_ptr<AudioBackend>>& all() {
   std::lock_guard<std::mutex> g(gMu);
   if (!gBackends) {
     gBackends = new std::vector<std::unique_ptr<AudioBackend>>(makeSystemBackends());
+    for (auto& m : makeModuleBackends()) {
+      bool taken = false;
+      for (auto& b : *gBackends) taken = taken || b->id() == m->id();
+      if (!taken) gBackends->push_back(std::move(m));
+    }
     if (gTest) gBackends->insert(gBackends->begin(), std::make_unique<LoopBackend>());
   }
   return *gBackends;

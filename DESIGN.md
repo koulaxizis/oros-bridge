@@ -66,9 +66,34 @@ native code, so a separate program hosts them and Studio talks to it.
    `takeRead` after `audioStop` and deleted on `audioClose` or when the page
    goes. `latency` is the bridge's estimate of the round trip (output buffer
    plus one input period); the card's own converters are not known, so
-   Studio adds the person's recording offset. ASIO comes as a separate
-   GPLv3 module (decision 2026-10-31: the ASIO SDK is GPLv3 or proprietary),
-   which adds one more backend and leaves this program MIT.
+   Studio adds the person's recording offset.
+
+10. **ASIO® as a separate GPLv3 module (0.4.0).** The ASIO SDK is GPLv3 or
+   proprietary (since 2025-10), so it lives in its own library,
+   `oros-bridge-asio.dll` (`asio/`, GPLv3, ASIO SDK 2.3.4 fetched at build
+   time), and the bridge stays MIT. The whole boundary is the plain C header
+   `src/audio_module.h` (MIT): one exported function returns a table with
+   `devices`, `open` and `close`; the stream calls the bridge back with
+   interleaved floats, exactly like the other backends. The bridge loads
+   `oros-bridge-asio.dll` from beside the exe if it is there
+   (`src/audio_module.cpp`); `--audio-module PATH` loads any other module
+   (the tests). In the module, one worker thread (COM single-threaded
+   apartment, a hidden window as the driver's `sysRef`) makes every driver
+   call, because ASIO allows one driver per process and many drivers want
+   their calls on the thread that loaded them; `bufferSwitch` converts the
+   card's samples (16/24/32-bit integer, 32/64-bit float) to and from float
+   and calls the bridge. ASIO has one driver for input and output, so the
+   same card name is required for both, and the buffer size is the one in the
+   driver's control panel. `latency` is the input plus output latency the
+   driver reports. While a card is open, listing returns the last list
+   instead of loading other drivers. Wherever ASIO is named (this repo's
+   docs, the release notes, Studio's sound card settings, the download
+   page), the ASIO Compatible Logo (`asio/logo/`) is shown with "ASIO is a
+   registered trademark of Steinberg Media Technologies GmbH.", as the SDK's
+   usage guidelines ask (decision 2026-10-31).
+
+   <img src="asio/logo/asio-compatible-bw.svg" alt="ASIO Compatible" height="72">
+
 
 ## Protocol (WebSocket, `ws://127.0.0.1:47621/`)
 
@@ -133,4 +158,11 @@ their frame), state in both formats and bad requests. With `--test-audio`
 the bridge also offers a loopback card (4 inputs, 2 outputs, every output
 back on an input 333 frames later, in real time), and the test checks that a
 take lines up with what was played sample for sample, the take blocks, the
-meters, a second take and bad requests. Real cards are tested by hand.
+meters, a second take and bad requests. `tests/test_audio_module.cpp` is an
+audio module with a loopback card (100 frames), loaded with `--audio-module`
+on every platform: the same take check through the module boundary. On
+Windows, `asio/test_driver.cpp` is a loopback ASIO driver (32-bit integer
+samples, 480 frames of reported and real latency): the test registers it as
+installers do (`HKLM\SOFTWARE\ASIO` and its COM class), checks the
+list, a take within one 32-bit step, the same-card rule and the one-driver
+rule, then removes it. Real cards are tested by hand.
