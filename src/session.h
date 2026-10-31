@@ -27,6 +27,7 @@ private:
   nlohmann::json command(const nlohmann::json& m);
   nlohmann::json audioCommand(const std::string& op, const nlohmann::json& m);
   nlohmann::json liveCommand(const std::string& op, const nlohmann::json& m);
+  nlohmann::json scanCommand(const std::string& op, const nlohmann::json& m);
   void closeLive();   // with audioMu_ held
   void playBlock(const std::vector<uint8_t>& d);
   void meters();
@@ -50,6 +51,10 @@ private:
   int liveH_ = 0;                 // the handle of the plugin live on the inputs, 0 = none
   std::thread meterThread_;
   std::atomic<bool> meterQuit_{false};
+  // a scan (0.9.0): its own thread, so the page and the plugins go on meanwhile
+  std::mutex scanMu_;
+  std::thread scanThread_;
+  std::atomic<bool> scanCancel_{false}, scanning_{false};
 };
 
 constexpr size_t kMaxOpen = 64;

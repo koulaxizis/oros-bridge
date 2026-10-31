@@ -198,6 +198,38 @@ native code, so a separate program hosts them and Studio talks to it.
    `--check-update` and `--update` do the same from a terminal.
    `OROS_BRIDGE_UPDATE_URL` points every request at a stand-in (tests).
 
+16. **Scanners for orOS Scan PDF (0.9.0).** A page cannot reach a scanner, so
+   the bridge does (improvement item 20, approved 2026-10-31). Windows: WIA
+   2.0 (`IWiaDevMgr2`, `src/scanner_wia.cpp`), part of Windows, which every
+   scanner driver speaks; each WIA call runs on a short-lived thread of its
+   own in the multithreaded apartment, so the WIA service's callbacks never
+   need a message loop; the glass and the feeder are the device's child items
+   (`WIA_CATEGORY_FLATBED` / `FEEDER`, duplex from
+   `WIA_IPS_DOCUMENT_HANDLING_CAPABILITIES`), resolutions and colour modes
+   from the item's valid values, and each page comes as a BMP in memory
+   (`IWiaTransfer::Download`), read into rows. Linux: SANE
+   (`src/scanner_sane.cpp`). `libsane.so.1` is loaded at run time like GTK, so
+   no SANE code or header is in the bridge (the types are written from the
+   SANE standard) and the bridge stays MIT; without SANE the list says
+   `nosane`. Network and USB multifunction printers need no vendor driver
+   through `sane-airscan` (eSCL, WSD) and `ipp-usb`, which the .deb/.rpm
+   recommend and orOS USB ships. Every SANE call runs under one lock (SANE is
+   not thread safe); each backend's own words for sources and modes ("Flatbed",
+   "ADF Duplex", "Color", "Gray", "Lineart" and the variants backends use) are
+   mapped to `flatbed` / `adf` / `adf-duplex` and `color` / `gray` /
+   `lineart`; 1- and 16-bit samples become 8-bit; a feeder scans until the
+   backend says it is empty. One scan at a time on this computer (a second
+   gets `busy`) on a thread of the page's session, never the plugin main
+   thread, so Studio renders on meanwhile. The list is kept: a page asks
+   `scanners` with `full` to look again (network scanners can take seconds),
+   and during a scan the kept list comes back. The window shows how many
+   scanners the last look found; it never looks by itself, so starting the
+   bridge never wakes a scanner. A page is sent in strips of about 1 MB
+   (`ORS1`, 8-bit rows, 1 or 3 channels) and closed with `scanPage`; a page
+   cut short by Cancel is not given. `--scanners` lists them in a terminal,
+   `--test-scanner` adds a test scanner (below). The window now says "orOS is
+   connected", since Studio and Scan PDF share the pairing.
+
 ## Protocol (WebSocket, `ws://127.0.0.1:47621/`)
 
 Text messages are JSON. A command carries `op` and an optional `id`; the
@@ -230,8 +262,11 @@ answer repeats the `id` and has `ok` (and `error` when false). Events have
 | `liveClose` | | |
 | `midiTake` | | `events`: [[frame, status, data1, data2]] the live plugin got during the last take, `lost` |
 | `midiTest` | `bytes` | the test keyboard plays them (`--test-audio`) |
+| `scanners` | `full`? | `scanners`: [{id, name, vendor, model, sources (`flatbed` \| `adf` \| `adf-duplex`), modes (`color` \| `gray` \| `lineart`), dpi}], `missing`: [{code, error}] for a backend that is not there (`nosane`) |
+| `scanStart` | `scanner`, `source`?, `mode`?, `dpi`? (50..1200; default flatbed, color, 300) | then `ORS1` strips, `scanProgress` {page, pct}, `scanPage` {page, width, height, channels} per page, and `scanDone` {pages, cancelled} or `scanError` {pages, code, error}; `code`: busy, nopaper, jammed, cover, denied, gone, unsupported, nosane, other |
+| `scanCancel` | | `scanning` |
 
-Events: `hello` {app, version, editors} on connect, `scanning`,
+Events: `hello` {app, version, editors, scanner (0.9.0)} on connect, `scanning`,
 `editorClosed`, `renderError` {h, seq, error}, `levels` {peaks (one per
 input channel), running, pos, live? {h, on, peak, slow, failed}}, `audioError` {offset, error} for a bad
 `ORP1` block.
@@ -241,6 +276,12 @@ Sound to play and takes are binary too:
 ```
 "ORP1" | u32 offset | u32 frames | u16 channels | u16 0 | channels × frames × float32
 "ORT1" | u32 offset | u32 frames | u16 channels | u16 0 | channels × frames × float32
+```
+
+A scanned page comes in strips, top to bottom:
+
+```
+"ORS1" | u32 page | u32 width | u32 y | u16 rows | u8 channels | u8 0 | rows × width × channels bytes
 ```
 
 A block to render is a binary message, little endian:
@@ -285,6 +326,15 @@ On Linux CI runs the test a second time under Xvfb: the CLAP test gain then
 has a window (Linux only) that asks the host for a 20 ms timer and a pipe to
 watch, and the test checks that the timer ticked, the pipe was read, the
 plugin got an X11 window id, and the ticks stop once the window is closed.
+With `--test-scanner` the bridge offers a test scanner (a glass, a feeder of
+3 sheets, both sides; every sample follows a formula), and the test checks
+the list, a page from the glass sample by sample with its progress, six
+duplex pages in order, line art, Cancel (the page cut short is not given),
+one scan at a time and bad requests. On Linux CI installs `libsane1` and the
+test also scans through the real libsane with SANE's own `test` backend only
+(`SANE_CONFIG_DIR` with `dll.conf` = `test`): the list, a grey and a colour
+page from the glass, and the feeder until it is empty. WIA has no stand-in:
+it is built on Windows CI and needs a real scanner to test.
 `tests/update.test.js` runs a copy of the bridge against a local stand-in
 for GitHub: older, equal, newer and prerelease tags; an update that replaces
 the copy (Windows: the exe and the ASIO module, the old ones kept as `.old`;

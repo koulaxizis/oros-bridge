@@ -22,6 +22,7 @@
 #include "gui_icon.h"   // kIconPng, made by CMake from res/oros-bridge.png
 #include "mainloop.h"
 #include "scan.h"
+#include "scanner.h"
 #include "update.h"
 
 namespace ob {
@@ -158,11 +159,13 @@ struct Strings {
       *autostart, *hide, *minimise, *forgetAsk, *open, *quit, *cannotStart;
   // 0.8.0: new versions
   const char *updOut, *updButton, *updPage, *updating, *updCheck, *updTray, *updDownload, *updChecksum, *updInstall, *updFiles;
+  // 0.9.0: scanners (counted once a page has looked for them)
+  const char* scanners;
 };
 const Strings kEn = {
-    "Ready. orOS Studio can connect.",
-    "orOS Studio is connected.",
-    "Pairing code — type it in orOS Studio:",
+    "Ready. Studio and Scan PDF can connect.",
+    "orOS is connected.",
+    "Pairing code — type it in orOS:",
     "In Studio: a track's settings › Plugin on this computer.",
     "Plugins found: %d (%d instruments, %d effects)",
     "No plugins found yet.",
@@ -187,11 +190,12 @@ const Strings kEn = {
     "The download did not match its checksum and was not used.",
     "The update was not installed.",
     "The program file could not be replaced.",
+    "Scanners found: %d (for orOS Scan PDF)",
 };
 const Strings kEl = {
-    "Έτοιμο. Το orOS Studio μπορεί να συνδεθεί.",
-    "Το orOS Studio είναι συνδεδεμένο.",
-    "Κωδικός σύζευξης — πληκτρολόγησέ τον στο orOS Studio:",
+    "Έτοιμο. Το Studio και το Scan PDF μπορούν να συνδεθούν.",
+    "Το orOS είναι συνδεδεμένο.",
+    "Κωδικός σύζευξης — πληκτρολόγησέ τον στο orOS:",
     "Στο Studio: ρυθμίσεις καναλιού › Plugin σε αυτόν τον υπολογιστή.",
     "Plugins που βρέθηκαν: %d (%d όργανα, %d εφέ)",
     "Δεν βρέθηκαν plugins ακόμα.",
@@ -216,6 +220,7 @@ const Strings kEl = {
     "Η λήψη δεν ταίριαξε με το checksum της και δεν χρησιμοποιήθηκε.",
     "Η ενημέρωση δεν εγκαταστάθηκε.",
     "Το αρχείο του προγράμματος δεν μπόρεσε να αντικατασταθεί.",
+    "Σαρωτές που βρέθηκαν: %d (για το orOS Scan PDF)",
 };
 const Strings& strings() {
   for (const char* v : {"LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"}) {
@@ -251,13 +256,14 @@ struct Gui {
   Server* server = nullptr;
   Pairing* pairing = nullptr;
   const Strings* s = &kEn;
-  W win = nullptr, status = nullptr, pairLabel = nullptr, code = nullptr, plugins = nullptr, folders = nullptr;
+  W win = nullptr, status = nullptr, pairLabel = nullptr, code = nullptr, plugins = nullptr, folders = nullptr, scanners = nullptr;
   W scan = nullptr, autostart = nullptr, menuAutostart = nullptr;
   W updRow = nullptr, updText = nullptr, updButton = nullptr, menuUpdate = nullptr, menuUpdateCheck = nullptr;
   std::string shownUpdate = "-";
   void* indicator = nullptr;
   bool setting = false;   // a toggle changed by us, not by the person
   std::string shownCode = "-", shownPlugins, shownFolders;
+  size_t shownScanners = 0;
   int shownLive = -1;
   std::atomic<bool> scanning{false};
   std::string iconDir, iconFile;
@@ -351,6 +357,15 @@ void refreshPlugins() {
     a.gtk_label_set_text(g.plugins, text.c_str());
   }
   a.gtk_widget_set_sensitive(g.scan, !scanning);
+  size_t sc = knownScanners();
+  if (sc != g.shownScanners) {
+    g.shownScanners = sc;
+    char buf[160];
+    std::snprintf(buf, sizeof buf, g.s->scanners, int(sc));
+    a.gtk_label_set_text(g.scanners, buf);
+    if (sc) a.gtk_widget_show(g.scanners);
+    else a.gtk_widget_hide(g.scanners);
+  }
   std::string f;
   for (auto& d : g.cfg->folders()) f += (f.empty() ? "" : "\n") + d;
   if (f != g.shownFolders) {
@@ -453,11 +468,12 @@ void createWindow() {
   g.pairLabel = label(s.hint, true);
   g.code = label("");
   g.plugins = label("");
+  g.scanners = label("");   // 0.9.0, shown once scanners were found
   g.folders = label("");
   a.gtk_label_set_selectable(g.folders, 1);
   a.gtk_widget_set_can_focus(g.folders, 0);   // selectable for copying, but not focused (all selected) at start
   a.gtk_label_set_line_wrap(g.folders, 1);
-  for (W w : {g.status, g.pairLabel, g.code, g.plugins}) a.gtk_box_pack_start(box, w, 0, 0, 0);
+  for (W w : {g.status, g.pairLabel, g.code, g.plugins, g.scanners}) a.gtk_box_pack_start(box, w, 0, 0, 0);
   a.gtk_box_pack_start(box, label(s.folders), 0, 0, 0);
   a.gtk_box_pack_start(box, g.folders, 0, 0, 0);
 
@@ -493,6 +509,7 @@ void createWindow() {
   a.gtk_box_pack_start(box, bottom, 0, 0, 0);
   a.gtk_widget_show_all(box);
   a.gtk_widget_hide(g.code);
+  a.gtk_widget_hide(g.scanners);
   a.gtk_widget_hide(g.updRow);
 }
 
