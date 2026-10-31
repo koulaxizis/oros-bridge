@@ -69,7 +69,7 @@ jobs:
       - name: CMake 3.28+
         run: pip install --user "cmake>=3.28,<4" && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: X11 headers and Xvfb
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libx11-dev xvfb
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libx11-dev xvfb desktop-file-utils
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - name: Build

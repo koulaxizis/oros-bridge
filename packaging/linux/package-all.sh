@@ -6,7 +6,7 @@
 #   oros-bridge-linux-x64.rpm      Fedora, openSUSE… (nfpm)
 #   oros-bridge-linux-x64.AppImage any distribution, no install (appimagetool)
 # Asset names stay the same between versions, so releases/latest/download/<name> always works.
-# Needs Go (for nfpm) and curl. The tools are pinned and the AppImage tool is checked by its SHA-256.
+# Needs Go (for nfpm), curl and desktop-file-validate (desktop-file-utils, for appimagetool). The tools are pinned and the AppImage tool is checked by its SHA-256.
 set -eu
 out=$1
 NFPM=v2.43.0
