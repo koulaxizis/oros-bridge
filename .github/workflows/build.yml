@@ -21,15 +21,19 @@ jobs:
           node-version: 22
       - name: X11 headers and Xvfb (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libx11-dev xvfb desktop-file-utils
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libx11-dev xvfb desktop-file-utils libsane1
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - name: Build
         run: cmake --build build --config Release --parallel
       - name: Test
+        env:
+          OROS_TEST_SANE: ${{ runner.os == 'Linux' && '1' || '' }}   # libsane with its own test backend
         run: ctest --test-dir build -C Release --output-on-failure
       - name: Test with a display (Linux, plugin windows on X11)
         if: runner.os == 'Linux'
+        env:
+          OROS_TEST_SANE: "1"
         run: xvfb-run -a ctest --test-dir build -C Release --output-on-failure
       - name: Package (Windows)
         if: runner.os == 'Windows'
