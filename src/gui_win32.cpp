@@ -11,6 +11,7 @@
 #include <thread>
 #include "mainloop.h"
 #include "scan.h"
+#include "scanner.h"
 #include "update.h"
 
 namespace ob {
@@ -31,11 +32,13 @@ struct Strings {
       *scan, *forget, *autostart, *hide, *forgetAsk, *trayHint, *codeTip, *open, *quit, *cannotStart;
   // 0.8.0: new versions
   const wchar_t *updOut, *updButton, *updPage, *updating, *updCheck, *updTray, *updDownload, *updChecksum, *updInstall, *updFiles;
+  // 0.9.0: scanners (counted once a page has looked for them)
+  const wchar_t* scanners;
 };
 const Strings kEn = {
-    L"Ready. orOS Studio can connect.",
-    L"orOS Studio is connected.",
-    L"Pairing code — type it in orOS Studio:",
+    L"Ready. Studio and Scan PDF can connect.",
+    L"orOS is connected.",
+    L"Pairing code — type it in orOS:",
     L"In Studio: a track's settings › Plugin on this computer.",
     L"Plugins found: %d (%d instruments, %d effects)",
     L"No plugins found yet.",
@@ -61,11 +64,12 @@ const Strings kEn = {
     L"The download did not match its checksum and was not used.",
     L"The update was not installed.",
     L"The program file could not be replaced.",
+    L"Scanners found: %d (for orOS Scan PDF)",
 };
 const Strings kEl = {
-    L"Έτοιμο. Το orOS Studio μπορεί να συνδεθεί.",
-    L"Το orOS Studio είναι συνδεδεμένο.",
-    L"Κωδικός σύζευξης — πληκτρολόγησέ τον στο orOS Studio:",
+    L"Έτοιμο. Το Studio και το Scan PDF μπορούν να συνδεθούν.",
+    L"Το orOS είναι συνδεδεμένο.",
+    L"Κωδικός σύζευξης — πληκτρολόγησέ τον στο orOS:",
     L"Στο Studio: ρυθμίσεις καναλιού › Plugin σε αυτόν τον υπολογιστή.",
     L"Plugins που βρέθηκαν: %d (%d όργανα, %d εφέ)",
     L"Δεν βρέθηκαν plugins ακόμα.",
@@ -91,6 +95,7 @@ const Strings kEl = {
     L"Η λήψη δεν ταίριαξε με το checksum της και δεν χρησιμοποιήθηκε.",
     L"Η ενημέρωση δεν εγκαταστάθηκε.",
     L"Το αρχείο του προγράμματος δεν μπόρεσε να αντικατασταθεί.",
+    L"Σαρωτές που βρέθηκαν: %d (για το orOS Scan PDF)",
 };
 
 const Strings& strings() {
@@ -110,7 +115,7 @@ struct Gui {
   Pairing* pairing = nullptr;
   const Strings* s = &kEn;
   HWND hwnd = nullptr;
-  HWND status = nullptr, pairLabel = nullptr, code = nullptr, plugins = nullptr, folders = nullptr;
+  HWND status = nullptr, pairLabel = nullptr, code = nullptr, plugins = nullptr, folders = nullptr, scanners = nullptr;
   HWND scan = nullptr, autostart = nullptr;
   HWND updText = nullptr, updButton = nullptr;
   std::wstring shownUpdate = L"-";
@@ -124,6 +129,7 @@ struct Gui {
   std::string shownCode = "-";
   int shownLive = -1;
   std::wstring shownPlugins, shownFolders;
+  size_t shownScanners = 0;
   std::atomic<bool> scanning{false};
 };
 Gui g;
@@ -238,6 +244,13 @@ void refreshPlugins() {
     SetWindowTextW(g.plugins, text.c_str());
   }
   EnableWindow(g.scan, !scanning);
+  size_t sc = knownScanners();
+  if (sc != g.shownScanners) {
+    g.shownScanners = sc;
+    wchar_t buf[128];
+    std::swprintf(buf, 128, g.s->scanners, int(sc));
+    SetWindowTextW(g.scanners, sc ? buf : L"");
+  }
   std::wstring f;
   for (auto& d : g.cfg->folders()) f += (f.empty() ? L"" : L"\r\n") + wide(d);
   if (f != g.shownFolders) {
@@ -247,7 +260,7 @@ void refreshPlugins() {
 }
 
 // a newer release: a line and a button at the bottom (the window grows by it); nothing pops up
-constexpr int kBaseH = 350, kUpdH = 36;
+constexpr int kBaseH = 372, kUpdH = 36;
 void fitWindow(bool withUpdate) {
   RECT r{0, 0, px(460), px(kBaseH + (withUpdate ? kUpdH : 0))};
   AdjustWindowRectEx(&r, DWORD(GetWindowLongPtrW(g.hwnd, GWL_STYLE)), FALSE, 0);
@@ -436,14 +449,15 @@ void createWindow() {
   g.code = add(L"STATIC", L"", SS_NOPREFIX, M, 78, inner, 50, 0, g.big);
   ShowWindow(g.code, SW_HIDE);
   g.plugins = add(L"STATIC", L"", SS_NOPREFIX, M, 134, inner, 20, 0, g.font);
-  add(L"STATIC", s.folders, SS_NOPREFIX, M, 158, inner, 20, 0, g.font);
-  g.folders = add(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL, M, 180, inner, 72, 0, g.font, WS_EX_CLIENTEDGE);
-  g.scan = add(L"BUTTON", s.scan, BS_PUSHBUTTON | WS_TABSTOP, M, 264, 180, 30, ID_SCAN, g.font);
-  add(L"BUTTON", s.forget, BS_PUSHBUTTON | WS_TABSTOP, M + 188, 264, 220, 30, ID_FORGET, g.font);
-  g.autostart = add(L"BUTTON", s.autostart, BS_AUTOCHECKBOX | WS_TABSTOP, M, 308, 280, 24, ID_AUTOSTART, g.font);
-  add(L"BUTTON", s.hide, BS_DEFPUSHBUTTON | WS_TABSTOP, M + inner - 110, 305, 110, 30, ID_HIDE, g.font);
-  g.updText = add(L"STATIC", L"", SS_NOPREFIX | SS_CENTERIMAGE, M, 346, inner - 170, 30, 0, g.bold);
-  g.updButton = add(L"BUTTON", s.updButton, BS_PUSHBUTTON | WS_TABSTOP, M + inner - 160, 346, 160, 30, ID_UPDATE, g.font);
+  g.scanners = add(L"STATIC", L"", SS_NOPREFIX, M, 156, inner, 20, 0, g.font);   // 0.9.0
+  add(L"STATIC", s.folders, SS_NOPREFIX, M, 180, inner, 20, 0, g.font);
+  g.folders = add(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL, M, 202, inner, 72, 0, g.font, WS_EX_CLIENTEDGE);
+  g.scan = add(L"BUTTON", s.scan, BS_PUSHBUTTON | WS_TABSTOP, M, 286, 180, 30, ID_SCAN, g.font);
+  add(L"BUTTON", s.forget, BS_PUSHBUTTON | WS_TABSTOP, M + 188, 286, 220, 30, ID_FORGET, g.font);
+  g.autostart = add(L"BUTTON", s.autostart, BS_AUTOCHECKBOX | WS_TABSTOP, M, 330, 280, 24, ID_AUTOSTART, g.font);
+  add(L"BUTTON", s.hide, BS_DEFPUSHBUTTON | WS_TABSTOP, M + inner - 110, 327, 110, 30, ID_HIDE, g.font);
+  g.updText = add(L"STATIC", L"", SS_NOPREFIX | SS_CENTERIMAGE, M, kBaseH - 4, inner - 170, 30, 0, g.bold);
+  g.updButton = add(L"BUTTON", s.updButton, BS_PUSHBUTTON | WS_TABSTOP, M + inner - 160, kBaseH - 4, 160, 30, ID_UPDATE, g.font);
   ShowWindow(g.updText, SW_HIDE);
   ShowWindow(g.updButton, SW_HIDE);
 }

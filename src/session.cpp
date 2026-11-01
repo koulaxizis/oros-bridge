@@ -7,16 +7,22 @@
 #include "editor.h"
 #include "mainloop.h"
 #include "scan.h"
+#include "scanner.h"
 
 namespace ob {
 
 Session::Session(Connection& conn, Config& cfg, Pairing& pairing) : conn_(conn), cfg_(cfg), pairing_(pairing) {
   nlohmann::json hello = {{"event", "hello"}, {"app", "oros-bridge"}, {"version", OROS_BRIDGE_VERSION},
-                          {"editors", EditorWindow::supported()}};
+                          {"editors", EditorWindow::supported()}, {"scanner", true}};
   conn_.sendText(hello.dump());
 }
 
 Session::~Session() {
+  scanCancel_ = true;
+  {
+    std::lock_guard<std::mutex> g(scanMu_);
+    if (scanThread_.joinable()) scanThread_.join();
+  }
   meterQuit_ = true;
   if (meterThread_.joinable()) meterThread_.join();
   {
@@ -110,6 +116,7 @@ nlohmann::json Session::command(const nlohmann::json& m) {
   // ----- the sound card -----
   if (op.rfind("audio", 0) == 0 || op == "takeRead") return audioCommand(op, m);
   if (op.rfind("live", 0) == 0 || op.rfind("midi", 0) == 0) return liveCommand(op, m);
+  if (op == "scanners" || op == "scanStart" || op == "scanCancel") return scanCommand(op, m);
 
   // ----- open plugins -----
   if (op == "open") {
@@ -486,5 +493,107 @@ void Session::onBinary(const std::vector<uint8_t>& d) {
   });
   if (!ok) { error(h, seq, "the plugin failed"); return; }
   conn_.sendBinary(out);
+}
+}
+
+namespace ob {
+namespace {
+// Sends a scan to the page: each page in "ORS1" strips, then a scanPage event
+//   "ORS1" | u32 page | u32 width | u32 y | u16 rows | u8 channels | u8 0 | rows × width × channels bytes
+class PageSink : public ScanSink {
+public:
+  PageSink(Connection& c, std::atomic<bool>& cancel) : conn_(c), cancel_(cancel) {}
+  uint32_t pages = 0;
+  void begin(uint32_t width, uint32_t channels) override {
+    w_ = width;
+    ch_ = channels;
+    y_ = 0;
+    open_ = true;
+    lastPct_ = -1;
+  }
+  void rows(const uint8_t* data, uint32_t n) override {
+    // at most 65535 rows and about 1 MB in one message
+    const uint32_t most = std::max<uint32_t>(1, std::min<uint32_t>(65535, uint32_t((1u << 20) / (size_t(w_) * ch_))));
+    while (n) {
+      uint32_t k = std::min(n, most);
+      size_t bytes = size_t(k) * w_ * ch_;
+      std::vector<uint8_t> out(20 + bytes);
+      std::memcpy(out.data(), "ORS1", 4);
+      put32(out.data() + 4, pages);
+      put32(out.data() + 8, w_);
+      put32(out.data() + 12, y_);
+      out[16] = uint8_t(k);
+      out[17] = uint8_t(k >> 8);
+      out[18] = uint8_t(ch_);
+      std::memcpy(out.data() + 20, data, bytes);
+      conn_.sendBinary(out);
+      data += bytes;
+      y_ += k;
+      n -= k;
+    }
+  }
+  void end() override {
+    if (!open_) return;
+    open_ = false;
+    conn_.sendText(nlohmann::json{{"event", "scanPage"}, {"page", pages}, {"width", w_}, {"height", y_}, {"channels", ch_}}.dump());
+    pages++;
+  }
+  void progress(int pct) override {
+    if (pct == lastPct_) return;
+    lastPct_ = pct;
+    conn_.sendText(nlohmann::json{{"event", "scanProgress"}, {"page", pages}, {"pct", pct}}.dump());
+  }
+  bool cancelled() override { return cancel_; }
+
+private:
+  static void put32(uint8_t* p, uint32_t v) { for (int i = 0; i < 4; i++) p[i] = uint8_t(v >> (8 * i)); }
+  Connection& conn_;
+  std::atomic<bool>& cancel_;
+  uint32_t w_ = 0, ch_ = 1, y_ = 0;
+  bool open_ = false;
+  int lastPct_ = -1;
+};
+}
+
+// Scanners: list them, scan (pages come as ORS1 strips and scanPage events,
+// then scanDone or scanError), cancel. One scan at a time on this computer.
+nlohmann::json Session::scanCommand(const std::string& op, const nlohmann::json& m) {
+  if (op == "scanners") {
+    std::vector<ScanError> notes;
+    auto list = listScanners(m.value("full", false), &notes);
+    auto missing = nlohmann::json::array();
+    for (auto& n : notes) missing.push_back({{"code", n.code}, {"error", n.text}});
+    return {{"ok", true}, {"scanners", list}, {"missing", missing}};
+  }
+  if (op == "scanCancel") {
+    scanCancel_ = true;
+    return {{"ok", true}, {"scanning", scanning_.load()}};
+  }
+  // scanStart
+  ScanRequest req;
+  std::string id = m.value("scanner", "");
+  req.source = m.value("source", "flatbed");
+  req.mode = m.value("mode", "color");
+  req.dpi = m.value("dpi", 300u);
+  if (id.empty() || id.size() > 1024) return fail("bad scanner");
+  if (req.source != "flatbed" && req.source != "adf" && req.source != "adf-duplex") return fail("bad source");
+  if (req.mode != "color" && req.mode != "gray" && req.mode != "lineart") return fail("bad mode");
+  if (req.dpi < 50 || req.dpi > 1200) return fail("bad dpi");
+  std::lock_guard<std::mutex> g(scanMu_);
+  if (scanning_) return fail("busy");
+  if (scanThread_.joinable()) scanThread_.join();
+  scanCancel_ = false;
+  scanning_ = true;
+  scanThread_ = std::thread([this, id, req] {
+    PageSink sink(conn_, scanCancel_);
+    ScanError err;
+    bool ok = runScan(id, req, sink, err);
+    nlohmann::json ev;
+    if (ok) ev = {{"event", "scanDone"}, {"pages", sink.pages}, {"cancelled", scanCancel_.load()}};
+    else ev = {{"event", "scanError"}, {"pages", sink.pages}, {"code", err.code}, {"error", err.text}};
+    scanning_ = false;
+    conn_.sendText(ev.dump());
+  });
+  return {{"ok", true}};
 }
 }

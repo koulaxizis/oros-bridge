@@ -9,6 +9,14 @@ Fetched at build time by CMake, pinned to a release, all MIT or more open:
 | [JSON for Modern C++](https://github.com/nlohmann/json) (Niels Lohmann) | 3.11.3 | MIT | the protocol's JSON |
 | [miniaudio](https://github.com/mackron/miniaudio) (David Reid) | 0.11.25 | public domain (Unlicense) or MIT No Attribution | the sound card: WASAPI, JACK, PulseAudio/PipeWire, ALSA |
 
+## Scanners: system libraries, not bundled
+
+On Windows the bridge uses WIA 2.0, which is part of Windows. On Linux it
+loads the system's SANE library (`libsane.so.1`, GPL-2.0-or-later with the
+SANE exception that lets any program use it) at run time, only if it is
+installed; no SANE code or header is in the bridge or its downloads. The few
+SANE types it needs are written from the public SANE standard.
+
 ## The ASIO® module (`oros-bridge-asio.dll`, Windows, GPLv3)
 
 <img src="asio/logo/asio-compatible-bw.svg" alt="ASIO Compatible" height="72">

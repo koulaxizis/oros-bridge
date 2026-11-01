@@ -2,6 +2,8 @@
 #   nfpm package -f packaging/linux/nfpm.yaml -p deb|rpm -t out/
 # from the repo root after the build. GTK 3 and the AppIndicator are only
 # recommended: without them the bridge still runs, as a terminal program.
+# SANE (libsane1, sane-airscan and ipp-usb for driverless network and USB scanners) is
+# recommended too: without it the bridge offers no scanners.
 name: oros-bridge
 arch: amd64
 platform: linux
@@ -12,7 +14,8 @@ maintainer: Christos Koulaxizis <koulaxizis@glarolykoi.net>
 description: |
   orOS Bridge lets orOS Studio (useoros.online) use your own VST3 and CLAP
   plugins and record through your sound card (JACK, PipeWire, PulseAudio,
-  ALSA). It listens on 127.0.0.1 only.
+  ALSA), and scan into orOS Scan PDF from a scanner (SANE). It listens on
+  127.0.0.1 only.
 vendor: orOS
 homepage: https://useoros.online
 license: MIT
@@ -34,7 +37,7 @@ contents:
 overrides:
   deb:
     depends: [libc6, libstdc++6]
-    recommends: [libgtk-3-0, libayatana-appindicator3-1, libx11-6]
+    recommends: [libgtk-3-0, libayatana-appindicator3-1, libx11-6, libsane1, sane-airscan, ipp-usb]
   rpm:
     depends: [glibc, libstdc++]
-    recommends: [gtk3, libayatana-appindicator-gtk3, libX11]
+    recommends: [gtk3, libayatana-appindicator-gtk3, libX11, sane-backends-libs, sane-airscan, ipp-usb]

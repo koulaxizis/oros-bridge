@@ -5,7 +5,8 @@ plugins installed on your computer. orOS Bridge is a small program you run on
 the computer: Studio talks to it over `127.0.0.1` (never the network), and it
 runs your plugins for Studio.
 
-Free, MIT, no account. It also records through your sound card (below).
+Free, MIT, no account. It also records through your sound card, and scans
+into orOS Scan PDF from your scanner (below).
 For **Windows** and **Linux** (since 0.7.0 with its own window, plugin
 windows, and .deb, .rpm and AppImage downloads). Plugins render ahead of
 time ("freeze"): Studio sends a track through the plugin and gets the sound
@@ -114,6 +115,19 @@ orOS Portable and the orOS installers carry the bridge and start it with
 `--code-file`); such a copy, and any copy with an `oros-bridge.bundled` file
 beside it, never updates itself: a new orOS brings the new bridge.
 
+### Scan into orOS Scan PDF (0.9.0)
+
+With the bridge running, orOS Scan PDF shows `Add from scanner`: choose the
+scanner, the glass or the feeder (both sides when it can), the resolution and
+colour, and the pages land in Scan PDF to crop, read (text recognition) and
+save. Studio and Scan PDF share the pairing, so a browser paired once is not
+asked again. On **Windows** every scanner with a Windows driver works (WIA).
+On **Linux** the bridge uses SANE: install `libsane1` (Debian, Ubuntu, Mint)
+or `sane-backends-libs` (Fedora), and `sane-airscan` and `ipp-usb` for
+network and USB multifunction printers that need no driver; the .deb and
+.rpm recommend them and orOS USB has them. `oros-bridge --scanners` lists the
+scanners it finds, and the window shows how many the last look found.
+
 ## Safety
 
 - It listens on `127.0.0.1` only, so other computers cannot reach it.
@@ -122,6 +136,8 @@ beside it, never updates itself: a new orOS brings the new bridge.
 - Each plugin file is first opened in a separate process, so a plugin that
   crashes while being read is left out instead of stopping the bridge.
 - Plugins are programs: the bridge runs the ones you installed, as you.
+- A scanner scans only when a paired page asks; the pages go to that page
+  only and the bridge keeps nothing.
 
 ## Build
 

@@ -13,6 +13,7 @@
 #include "gui.h"
 #include "mainloop.h"
 #include "scan.h"
+#include "scanner.h"
 #include "server.h"
 #include "update.h"
 #ifdef _WIN32
@@ -32,7 +33,9 @@ static const char* kUsage =
     "  --config-dir DIR            keep settings in DIR\n"
     "  --scan                      look for plugins, print them, exit\n"
     "  --forget-pairings           forget every paired browser, exit\n"
+    "  --scanners                  look for scanners (WIA, SANE), print them, exit\n"
     "  --test-audio                also offer a loopback sound card (tests)\n"
+    "  --test-scanner              also offer a test scanner (tests)\n"
     "  --audio-module PATH         also offer the sound system in this library\n"
     "  --code-file PATH            keep the open pairing code in PATH (removed when none is open)\n"
     "  --bundled                   started by orOS (Portable, the installers): no window, no console,\n"
@@ -109,7 +112,7 @@ int main(int argc, char** argv) {
   ServerOptions opt;
   opt.origins = {"https://useoros.online", "https://www.useoros.online"};
   std::string dir = Config::defaultDir();
-  bool scanOnly = false, forget = false, console = false, tray = false, help = false;
+  bool scanOnly = false, scannersOnly = false, forget = false, console = false, tray = false, help = false;
   bool bundled = false, checkUpdate = false, doUpdate = false;
   long afterUpdate = 0;
   std::string codeFile;
@@ -128,6 +131,8 @@ int main(int argc, char** argv) {
     else if (a == "--allow-origin") opt.origins.push_back(next());
     else if (a == "--config-dir") dir = next();
     else if (a == "--scan") scanOnly = true;
+    else if (a == "--scanners") scannersOnly = true;
+    else if (a == "--test-scanner") enableTestScanner();
     else if (a == "--forget-pairings") forget = true;
     else if (a == "--console") console = true;
     else if (a == "--tray") tray = true;
@@ -141,7 +146,7 @@ int main(int argc, char** argv) {
     else if (a == "--help" || a == "-h") { console = true; help = true; }
     else { unknown = a; break; }
   }
-  bool cli = console || bundled || scanOnly || forget || checkUpdate || doUpdate || !unknown.empty();
+  bool cli = console || bundled || scanOnly || scannersOnly || forget || checkUpdate || doUpdate || !unknown.empty();
 #ifdef _WIN32
   bool gui = !cli;
   if (!gui && !bundled) useConsole();   // bundled: the output goes where orOS sent it
@@ -164,6 +169,14 @@ int main(int argc, char** argv) {
   if (forget) {
     cfg.forgetTokens();
     std::cout << "Every paired browser was forgotten.\n";
+    return 0;
+  }
+  if (scannersOnly) {
+    std::vector<ScanError> notes;
+    for (auto& s : listScanners(true, &notes))
+      std::cout << s.id << "\t" << s.name << "\t" << nlohmann::json(s.sources).dump() << "\t" << nlohmann::json(s.modes).dump()
+                << "\t" << nlohmann::json(s.dpi).dump() << "\n";
+    for (auto& n : notes) std::cerr << n.code << ": " << n.text << "\n";
     return 0;
   }
   if (scanOnly) {

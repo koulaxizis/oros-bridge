@@ -35,9 +35,13 @@ test.before(async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "oros-bridge-"));
   fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify({ folders: [PLUGINS] }));
   codeFile = path.join(dir, "code.txt");
-  const args = ["--console", "--port", "0", "--config-dir", dir, "--allow-origin", ORIGIN, "--test-audio", "--code-file", codeFile];
+  const args = ["--console", "--port", "0", "--config-dir", dir, "--allow-origin", ORIGIN, "--test-audio", "--test-scanner", "--code-file", codeFile];
   if (process.env.OROS_TEST_AUDIO_MODULE) args.push("--audio-module", process.env.OROS_TEST_AUDIO_MODULE);
-  proc = spawn(BRIDGE, args, { stdio: ["ignore", "pipe", "inherit"] });
+  // SANE: only its own `test` backend (OROS_TEST_SANE=1, Linux CI with libsane1), or no SANE backend at all
+  const saneDir = path.join(dir, "sane");
+  fs.mkdirSync(saneDir);
+  fs.writeFileSync(path.join(saneDir, "dll.conf"), process.env.OROS_TEST_SANE ? "test\n" : "");
+  proc = spawn(BRIDGE, args, { stdio: ["ignore", "pipe", "inherit"], env: Object.assign({}, process.env, { SANE_CONFIG_DIR: saneDir }) });
   await new Promise((res, rej) => {
     proc.on("exit", (c) => rej(new Error("bridge exited " + c)));
     proc.stdout.on("data", (d) => {
@@ -659,4 +663,136 @@ test("ASIO: the loopback driver is listed, a take lines up with what was played"
   await sleep(300);
   assert.equal((await c2.cmd({ op: "audioOpen", backend: "asio", input: "orOS Test ASIO" })).ok, true);
   c2.close();
+});
+
+// ---- scanners (0.9.0) ----
+// Runs a scan and collects its pages: ORS1 strips put together, checked in order
+async function scanPages(c, o, { cancelAfter } = {}) {
+  const r = await c.cmd(Object.assign({ op: "scanStart" }, o));
+  if (!r.ok) return { r };
+  const pages = [], progress = [];
+  let cur = null, strips = 0;
+  for (;;) {
+    const m = await c.next();
+    if (Buffer.isBuffer(m)) {
+      assert.equal(m.slice(0, 4).toString(), "ORS1");
+      const page = m.readUInt32LE(4), w = m.readUInt32LE(8), y = m.readUInt32LE(12), rows = m.readUInt16LE(16), ch = m[18];
+      if (!cur) cur = { page, w, ch, parts: [], h: 0 };
+      assert.equal(page, cur.page);
+      assert.equal(y, cur.h, "strips come in order");
+      assert.equal(m.length, 20 + rows * w * ch);
+      cur.parts.push(m.slice(20));
+      cur.h += rows;
+      if (++strips === cancelAfter) c.send(JSON.stringify({ id: 9999, op: "scanCancel" }), 1);
+    } else if (m.event === "scanPage") {
+      assert.ok(cur, "a page has strips");
+      assert.deepEqual([m.page, m.width, m.height, m.channels], [cur.page, cur.w, cur.h, cur.ch]);
+      pages.push({ w: cur.w, h: cur.h, ch: cur.ch, data: Buffer.concat(cur.parts) });
+      cur = null;
+    } else if (m.event === "scanProgress") {
+      progress.push(m);
+    } else if (m.event === "scanDone" || m.event === "scanError") {
+      return { r, pages, progress, end: m };
+    }
+  }
+}
+function checkTestPage(pg, mode, p) {
+  for (let y = 0; y < pg.h; y += 7)
+    for (let x = 0; x < pg.w; x += 5)
+      for (let c = 0; c < pg.ch; c++) {
+        const want = mode === "color" ? (x + 2 * y + 50 * c + 30 * p) & 255 : mode === "gray" ? (x + y + 30 * p) & 255 : ((((x >> 3) + (y >> 3)) & 1) ? 0 : 255);
+        const got = pg.data[(y * pg.w + x) * pg.ch + c];
+        if (got !== want) assert.fail(`page ${p} ${mode} (${x},${y},${c}): ${got} != ${want}`);
+      }
+}
+
+test("scanner: hello says so, the test scanner is listed with what it offers", async () => {
+  const c = await Client.open();
+  const hello = await c.next();
+  assert.equal(hello.event, "hello");
+  assert.equal(hello.scanner, true);
+  assert.equal((await c.cmd({ op: "scanners" })).ok, false, "not before pairing");
+  assert.equal((await c.cmd({ op: "auth", token })).ok, true);
+  const r = await c.cmd({ op: "scanners", full: true });
+  assert.equal(r.ok, true);
+  const t = r.scanners.find((s) => s.id === "test:loop");
+  assert.ok(t, JSON.stringify(r));
+  assert.deepEqual(t.sources, ["flatbed", "adf", "adf-duplex"]);
+  assert.deepEqual(t.modes, ["color", "gray", "lineart"]);
+  assert.deepEqual(t.dpi, [75, 150, 300, 600]);
+  assert.ok(Array.isArray(r.missing));
+  c.close();
+});
+
+test("scanner: the glass gives one page, every sample as scanned, with progress", async () => {
+  const c = await paired();
+  const s = await scanPages(c, { scanner: "test:loop", source: "flatbed", mode: "color", dpi: 75 });
+  assert.equal(s.r.ok, true);
+  assert.deepEqual(s.end, { event: "scanDone", pages: 1, cancelled: false });
+  assert.equal(s.pages.length, 1);
+  assert.deepEqual([s.pages[0].w, s.pages[0].h, s.pages[0].ch], [150, 225, 3]);
+  checkTestPage(s.pages[0], "color", 0);
+  assert.ok(s.progress.length >= 2 && s.progress[s.progress.length - 1].pct === 100);
+  c.close();
+});
+
+test("scanner: the feeder on both sides gives six grey pages, line art is black and white", async () => {
+  const c = await paired();
+  const s = await scanPages(c, { scanner: "test:loop", source: "adf-duplex", mode: "gray", dpi: 75 });
+  assert.equal(s.end.event, "scanDone");
+  assert.equal(s.pages.length, 6);
+  s.pages.forEach((pg, p) => { assert.equal(pg.ch, 1); checkTestPage(pg, "gray", p); });
+  const l = await scanPages(c, { scanner: "test:loop", source: "adf", mode: "lineart", dpi: 150 });
+  assert.equal(l.pages.length, 3);
+  assert.deepEqual([l.pages[2].w, l.pages[2].h, l.pages[2].ch], [300, 450, 1]);
+  checkTestPage(l.pages[2], "lineart", 2);
+  c.close();
+});
+
+test("scanner: cancel stops the scan, one scan at a time, bad requests are refused", async () => {
+  const c = await paired();
+  const s = await scanPages(c, { scanner: "test:loop", source: "adf", mode: "color", dpi: 600 }, { cancelAfter: 2 });
+  assert.equal(s.end.event, "scanDone");
+  assert.equal(s.end.cancelled, true);
+  assert.equal(s.pages.length, 0, "the page that was cut short is not given");
+  // a second page cannot scan while one scans
+  const other = await paired();
+  const first = await c.cmd({ op: "scanStart", scanner: "test:loop", source: "adf", mode: "color", dpi: 300 });
+  assert.equal(first.ok, true);
+  const second = await scanPages(other, { scanner: "test:loop", source: "flatbed", mode: "gray", dpi: 75 });
+  assert.equal(second.end.event, "scanError");
+  assert.equal(second.end.code, "busy");
+  assert.equal((await c.cmd({ op: "scanStart", scanner: "test:loop" })).error, "busy", "this page is scanning already");
+  await c.cmd({ op: "scanCancel" });
+  for (;;) { const m = await c.next(); if (m && m.event === "scanDone") break; }
+  for (const bad of [{ source: "tray" }, { mode: "sepia" }, { dpi: 20 }, { dpi: 4800 }, { scanner: "" }]) {
+    const r = await c.cmd(Object.assign({ op: "scanStart", scanner: "test:loop" }, bad));
+    assert.equal(r.ok, false, JSON.stringify(bad));
+  }
+  const gone = await scanPages(c, { scanner: "test:nothing" });
+  assert.equal(gone.end.code, "gone");
+  const noBackend = await scanPages(c, { scanner: "nope:1" });
+  assert.equal(noBackend.end.code, "gone");
+  other.close();
+  c.close();
+});
+
+test("scanner: SANE through libsane and its test backend", { skip: !process.env.OROS_TEST_SANE }, async () => {
+  const c = await paired();
+  const r = await c.cmd({ op: "scanners", full: true });
+  const t = r.scanners.find((s) => s.id === "sane:test:0");
+  assert.ok(t, JSON.stringify(r));
+  assert.ok(t.sources.includes("flatbed") && t.modes.includes("gray") && t.dpi.includes(75));
+  const s = await scanPages(c, { scanner: t.id, source: "flatbed", mode: "gray", dpi: 75 });
+  assert.equal(s.end.event, "scanDone", JSON.stringify(s.end));
+  assert.equal(s.pages.length, 1);
+  assert.ok(s.pages[0].w > 0 && s.pages[0].h > 0 && s.pages[0].ch === 1);
+  const col = await scanPages(c, { scanner: t.id, source: "flatbed", mode: "color", dpi: 75 });
+  assert.equal(col.pages.length, 1);
+  assert.equal(col.pages[0].ch, 3);
+  // the feeder: pages until the backend says it is empty, then done
+  const adf = await scanPages(c, { scanner: t.id, source: "adf", mode: "gray", dpi: 75 });
+  assert.equal(adf.end.event, "scanDone", JSON.stringify(adf.end));
+  assert.ok(adf.pages.length >= 1);
+  c.close();
 });
