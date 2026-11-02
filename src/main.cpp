@@ -8,6 +8,7 @@
 #include <iostream>
 #include <thread>
 #include "audio.h"
+#include "cast.h"
 #include "midi.h"
 #include "config.h"
 #include "gui.h"
@@ -36,6 +37,7 @@ static const char* kUsage =
     "  --scanners                  look for scanners (WIA, SANE), print them, exit\n"
     "  --test-audio                also offer a loopback sound card (tests)\n"
     "  --test-scanner              also offer a test scanner (tests)\n"
+    "  --test-renderer HOST:PORT   also search for TVs at this address (tests)\n"
     "  --audio-module PATH         also offer the sound system in this library\n"
     "  --code-file PATH            keep the open pairing code in PATH (removed when none is open)\n"
     "  --bundled                   started by orOS (Portable, the installers): no window, no console,\n"
@@ -133,6 +135,7 @@ int main(int argc, char** argv) {
     else if (a == "--scan") scanOnly = true;
     else if (a == "--scanners") scannersOnly = true;
     else if (a == "--test-scanner") enableTestScanner();
+    else if (a == "--test-renderer") cast::addTestTarget(next());
     else if (a == "--forget-pairings") forget = true;
     else if (a == "--console") console = true;
     else if (a == "--tray") tray = true;

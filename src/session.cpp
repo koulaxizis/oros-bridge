@@ -4,6 +4,7 @@
 #include <cstring>
 #include <thread>
 #include "base64.h"
+#include "cast.h"
 #include "editor.h"
 #include "mainloop.h"
 #include "scan.h"
@@ -13,7 +14,7 @@ namespace ob {
 
 Session::Session(Connection& conn, Config& cfg, Pairing& pairing) : conn_(conn), cfg_(cfg), pairing_(pairing) {
   nlohmann::json hello = {{"event", "hello"}, {"app", "oros-bridge"}, {"version", OROS_BRIDGE_VERSION},
-                          {"editors", EditorWindow::supported()}, {"scanner", true}};
+                          {"editors", EditorWindow::supported()}, {"scanner", true}, {"cast", true}};
   conn_.sendText(hello.dump());
 }
 
@@ -117,6 +118,7 @@ nlohmann::json Session::command(const nlohmann::json& m) {
   if (op.rfind("audio", 0) == 0 || op == "takeRead") return audioCommand(op, m);
   if (op.rfind("live", 0) == 0 || op.rfind("midi", 0) == 0) return liveCommand(op, m);
   if (op == "scanners" || op == "scanStart" || op == "scanCancel") return scanCommand(op, m);
+  if (op == "renderers" || op.rfind("cast", 0) == 0 || op == "bluetoothSettings") return castCommand(op, m);
 
   // ----- open plugins -----
   if (op == "open") {
@@ -595,5 +597,52 @@ nlohmann::json Session::scanCommand(const std::string& op, const nlohmann::json&
     conn_.sendText(ev.dump());
   });
   return {{"ok", true}};
+}
+
+// TVs and speakers on the network (0.10.0): list them, send a stream, play,
+// pause, stop, the volume, and the system's Bluetooth settings.
+nlohmann::json Session::castCommand(const std::string& op, const nlohmann::json& m) {
+  if (op == "bluetoothSettings") return {{"ok", true}, {"opened", cast::openBluetoothSettings()}};
+  if (op == "renderers") {
+    auto list = nlohmann::json::array();
+    for (auto& r : cast::renderers(m.value("full", false))) list.push_back(cast::toJson(r));
+    return {{"ok", true}, {"renderers", list}};
+  }
+  if (!m.contains("renderer") || !m["renderer"].is_string()) return fail("bad renderer");
+  std::string id = m["renderer"];
+  if (id.empty() || id.size() > 256) return fail("bad renderer");
+  cast::Error err;
+  auto failed = [&] { return nlohmann::json{{"ok", false}, {"code", err.code}, {"error", err.text}}; };
+  if (op == "castStart") {
+    if (!m.contains("url") || !m["url"].is_string()) return fail("bad url");
+    std::string kind = m.value("kind", "audio"), mime = m.value("mime", ""), title = m.value("title", "");
+    if (kind != "audio" && kind != "video") return fail("bad kind");
+    if (mime.size() > 100 || mime.find_first_of("<>\"&' \t\r\n") != std::string::npos) return fail("bad mime");
+    if (title.size() > 1000) return fail("bad title");
+    if (!cast::start(id, m["url"], title, kind, mime, err)) return failed();
+    return {{"ok", true}};
+  }
+  if (op == "castControl") {
+    std::string action = m.value("action", "");
+    if (action != "play" && action != "pause" && action != "stop" && action != "volume") return fail("bad action");
+    int vol = 0;
+    if (action == "volume") {
+      if (!m.contains("volume") || !m["volume"].is_number()) return fail("bad volume");
+      double v = m["volume"];
+      if (!(v >= 0 && v <= 100)) return fail("bad volume");
+      vol = int(v + 0.5);
+    }
+    if (!cast::control(id, action, vol, err)) return failed();
+    return {{"ok", true}};
+  }
+  if (op == "castStatus") {
+    std::string state;
+    int vol = -1;
+    if (!cast::status(id, state, vol, err)) return failed();
+    nlohmann::json out = {{"ok", true}, {"state", state}};
+    if (vol >= 0) out["volume"] = vol;
+    return out;
+  }
+  return fail("unknown op");
 }
 }

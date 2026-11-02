@@ -1,7 +1,7 @@
 # orOS Bridge: hosts the person's own VST3 and CLAP plugins for orOS Studio,
 # on this computer only (127.0.0.1). See DESIGN.md.
 cmake_minimum_required(VERSION 3.28)
-project(oros_bridge VERSION 0.9.1 LANGUAGES C CXX)
+project(oros_bridge VERSION 0.10.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -71,6 +71,7 @@ add_library(bridge_core STATIC
   src/scanner.cpp
   src/scanner_sane.cpp
   src/scanner_wia.cpp
+  src/cast.cpp
   src/clap_host.cpp
   src/vst3_host.cpp
   src/editor.cpp
