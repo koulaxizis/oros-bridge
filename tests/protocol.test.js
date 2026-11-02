@@ -30,6 +30,78 @@ async function waitFor(cond, what, ms = 2000) {
 }
 const codes = [];
 
+// ---- a fake TV on the network (0.10.0): SSDP answers on a UDP port the
+// bridge is told about (--test-renderer), a UPnP description and SOAP
+// control over HTTP, like a DLNA TV or Kodi ----
+const dgram = require("node:dgram");
+const http = require("node:http");
+const tv = { actions: [], state: "NO_MEDIA_PRESENT", volume: 30, uri: "", meta: "", failSetOnce: false, searches: 0 };
+function soapAnswer(res, action, type, inner = "") {
+  res.writeHead(200, { "Content-Type": 'text/xml; charset="utf-8"' });
+  res.end('<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:' + action +
+    'Response xmlns:u="' + type + '">' + inner + "</u:" + action + "Response></s:Body></s:Envelope>");
+}
+const AVT = "urn:schemas-upnp-org:service:AVTransport:1", RC = "urn:schemas-upnp-org:service:RenderingControl:1";
+const unxml = (t) => t.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&");
+const tag = (x, n) => { const m = new RegExp("<" + n + ">([\\s\\S]*?)</" + n + ">").exec(x); return m ? m[1] : null; };
+async function startFakeTv() {
+  const srv = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => { body += d; });
+    req.on("end", () => {
+      const p = srv.address().port;
+      if (req.method === "GET" && req.url === "/dev/desc.xml") {
+        res.writeHead(200, { "Content-Type": "text/xml" });
+        res.end('<?xml version="1.0"?><root xmlns="urn:schemas-upnp-org:device-1-0"><device>' +
+          "<deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>" +
+          "<friendlyName>Living room TV &amp; co</friendlyName><manufacturer>Test</manufacturer><modelName>Loop 1</modelName>" +
+          "<UDN>uuid:test-tv</UDN><serviceList>" +
+          "<service><serviceType>" + AVT + "</serviceType><controlURL>ctl/avt</controlURL></service>" +
+          "<service><serviceType>" + RC + "</serviceType><controlURL>http://127.0.0.1:" + p + "/rc</controlURL></service>" +
+          "</serviceList></device></root>");
+        return;
+      }
+      if (req.method === "GET" && req.url === "/evil/desc.xml") {   // control on another host: never used
+        res.writeHead(200, { "Content-Type": "text/xml" });
+        res.end("<root><device><friendlyName>Elsewhere</friendlyName><UDN>uuid:evil</UDN><serviceList><service><serviceType>" + AVT +
+          "</serviceType><controlURL>http://8.8.8.8/avt</controlURL></service></serviceList></device></root>");
+        return;
+      }
+      const sa = String(req.headers.soapaction || "").replace(/"/g, "");
+      const action = sa.split("#")[1];
+      if (req.method !== "POST" || !(req.url === "/dev/ctl/avt" || req.url === "/rc")) { res.writeHead(404); res.end(); return; }
+      tv.actions.push(action);
+      if (action === "SetAVTransportURI") {
+        if (tv.failSetOnce) { tv.failSetOnce = false; res.writeHead(500); res.end("<s:Envelope><s:Body><s:Fault><detail><UPnPError><errorCode>705</errorCode><errorDescription>Transport locked</errorDescription></UPnPError></detail></s:Fault></s:Body></s:Envelope>"); return; }
+        tv.uri = unxml(tag(body, "CurrentURI") || ""); tv.meta = unxml(tag(body, "CurrentURIMetaData") || ""); tv.state = "STOPPED";
+        return soapAnswer(res, action, AVT);
+      }
+      if (action === "Play") { tv.state = "PLAYING"; return soapAnswer(res, action, AVT); }
+      if (action === "Pause") { tv.state = "PAUSED_PLAYBACK"; return soapAnswer(res, action, AVT); }
+      if (action === "Stop") { tv.state = "STOPPED"; return soapAnswer(res, action, AVT); }
+      if (action === "GetTransportInfo") return soapAnswer(res, action, AVT, "<CurrentTransportState>" + tv.state + "</CurrentTransportState><CurrentTransportStatus>OK</CurrentTransportStatus>");
+      if (action === "SetVolume") { tv.volume = +tag(body, "DesiredVolume"); return soapAnswer(res, action, RC); }
+      if (action === "GetVolume") return soapAnswer(res, action, RC, "<CurrentVolume>" + tv.volume + "</CurrentVolume>");
+      res.writeHead(500); res.end();
+    });
+  });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  srv.unref();
+  const hp = srv.address().port;
+  const udp = dgram.createSocket("udp4");
+  udp.on("message", (msg, rinfo) => {
+    const t = msg.toString();
+    if (!/^M-SEARCH \* HTTP\/1\.1/.test(t) || !/ST: urn:schemas-upnp-org:device:MediaRenderer:1/.test(t)) return;
+    tv.searches++;
+    for (const loc of ["http://127.0.0.1:" + hp + "/dev/desc.xml", "http://127.0.0.1:" + hp + "/evil/desc.xml", "http://8.8.8.8:1/desc.xml"]) {
+      udp.send("HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nLOCATION: " + loc + "\r\nST: urn:schemas-upnp-org:device:MediaRenderer:1\r\nUSN: x\r\n\r\n", rinfo.port, rinfo.address);
+    }
+  });
+  await new Promise((r) => udp.bind(0, "127.0.0.1", r));
+  udp.unref();
+  return udp.address().port;
+}
+
 test.before(async () => {
   assert.ok(BRIDGE && PLUGINS, "set OROS_BRIDGE and OROS_TEST_PLUGINS");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "oros-bridge-"));
@@ -37,6 +109,7 @@ test.before(async () => {
   codeFile = path.join(dir, "code.txt");
   const args = ["--console", "--port", "0", "--config-dir", dir, "--allow-origin", ORIGIN, "--test-audio", "--test-scanner", "--code-file", codeFile];
   if (process.env.OROS_TEST_AUDIO_MODULE) args.push("--audio-module", process.env.OROS_TEST_AUDIO_MODULE);
+  args.push("--test-renderer", "127.0.0.1:" + (await startFakeTv()));
   // SANE: only its own `test` backend (OROS_TEST_SANE=1, Linux CI with libsane1), or no SANE backend at all
   const saneDir = path.join(dir, "sane");
   fs.mkdirSync(saneDir);
@@ -807,5 +880,80 @@ test("scanner: SANE through libsane and its test backend", { skip: !process.env.
   const adf = await scanPages(c, { scanner: t.id, source: "adf", mode: "gray", dpi: 75 });
   assert.equal(adf.end.event, "scanDone", JSON.stringify(adf.end));
   assert.ok(adf.pages.length >= 1);
+  c.close();
+});
+
+// ---- TVs and speakers on the network (0.10.0) ----
+test("cast: hello says so, the fake TV is found, devices elsewhere are left out", async () => {
+  const c = await Client.open();
+  const hello = await c.next();
+  assert.equal(hello.cast, true);
+  assert.equal((await c.cmd({ op: "renderers" })).ok, false, "not before pairing");
+  assert.equal((await c.cmd({ op: "auth", token })).ok, true);
+  const r = await c.cmd({ op: "renderers", full: true });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.ok(tv.searches >= 1, "the search reached the test address");
+  assert.deepEqual(r.renderers, [{ id: "upnp:test-tv", name: "Living room TV & co", vendor: "Test", model: "Loop 1", volume: true }]);
+  const again = await c.cmd({ op: "renderers" });   // the kept list, no new search
+  assert.deepEqual(again.renderers, r.renderers);
+  c.close();
+});
+
+test("cast: send a stream, it plays, pause, volume, stop; the title is escaped", async () => {
+  const c = await paired();
+  await c.cmd({ op: "renderers" });
+  tv.actions.length = 0;
+  const url = "https://radio.example/live?x=1&y=2";
+  const s = await c.cmd({ op: "castStart", renderer: "upnp:test-tv", url, title: "Jazz <FM> & \"more\"", kind: "audio" });
+  assert.equal(s.ok, true, JSON.stringify(s));
+  assert.deepEqual(tv.actions, ["SetAVTransportURI", "Play"]);
+  assert.equal(tv.uri, url);
+  assert.match(tv.meta, /<dc:title>Jazz &lt;FM&gt; &amp; &quot;more&quot;<\/dc:title>/);
+  assert.match(tv.meta, /protocolInfo="http-get:\*:audio\/mpeg:\*">https:\/\/radio\.example\/live\?x=1&amp;y=2<\/res>/);
+  assert.match(tv.meta, /object\.item\.audioItem\.audioBroadcast/);
+  const st = await c.cmd({ op: "castStatus", renderer: "upnp:test-tv" });
+  assert.deepEqual([st.ok, st.state, st.volume], [true, "playing", 30]);
+  assert.equal((await c.cmd({ op: "castControl", renderer: "upnp:test-tv", action: "pause" })).ok, true);
+  assert.equal((await c.cmd({ op: "castStatus", renderer: "upnp:test-tv" })).state, "paused");
+  assert.equal((await c.cmd({ op: "castControl", renderer: "upnp:test-tv", action: "volume", volume: 55 })).ok, true);
+  assert.equal(tv.volume, 55);
+  assert.equal((await c.cmd({ op: "castControl", renderer: "upnp:test-tv", action: "stop" })).ok, true);
+  assert.equal((await c.cmd({ op: "castStatus", renderer: "upnp:test-tv" })).state, "stopped");
+  // a TV that refuses a new address while busy gets Stop and the address again
+  tv.failSetOnce = true; tv.actions.length = 0;
+  const v = await c.cmd({ op: "castStart", renderer: "upnp:test-tv", url: "https://tv.example/ch.m3u8", title: "News", kind: "video" });
+  assert.equal(v.ok, true, JSON.stringify(v));
+  assert.deepEqual(tv.actions, ["SetAVTransportURI", "Stop", "SetAVTransportURI", "Play"]);
+  assert.match(tv.meta, /application\/vnd\.apple\.mpegurl/);
+  assert.match(tv.meta, /videoItem\.videoBroadcast/);
+  c.close();
+});
+
+test("cast: bad requests are refused, the connection lives on", async () => {
+  const c = await paired();
+  await c.cmd({ op: "renderers" });
+  tv.actions.length = 0;
+  for (const url of ["javascript:alert(1)", "file:///etc/passwd", "data:audio/mp3,AA", "https://a b", 5, ""]) {
+    const r = await c.cmd({ op: "castStart", renderer: "upnp:test-tv", url });
+    assert.equal(r.ok, false, String(url));
+  }
+  assert.equal((await c.cmd({ op: "castStart", renderer: "upnp:nope", url: "https://x.example/" })).code, "notfound");
+  assert.equal((await c.cmd({ op: "castStart", renderer: "upnp:evil", url: "https://x.example/" })).code, "notfound");
+  assert.equal((await c.cmd({ op: "castStart", renderer: "upnp:test-tv", url: "https://x.example/", kind: "image" })).ok, false);
+  assert.equal((await c.cmd({ op: "castStart", renderer: "upnp:test-tv", url: "https://x.example/", mime: 'a"b' })).ok, false);
+  assert.equal((await c.cmd({ op: "castControl", renderer: "upnp:test-tv", action: "eject" })).ok, false);
+  assert.equal((await c.cmd({ op: "castControl", renderer: "upnp:test-tv", action: "volume", volume: 101 })).ok, false);
+  assert.equal((await c.cmd({ op: "castControl", renderer: "upnp:test-tv", action: "volume" })).ok, false);
+  assert.equal((await c.cmd({ op: "castStatus" })).ok, false);
+  assert.deepEqual(tv.actions, [], "nothing reached the TV");
+  assert.equal((await c.cmd({ op: "castStatus", renderer: "upnp:test-tv" })).ok, true);
+  c.close();
+});
+
+test("cast: Bluetooth settings answer whether a settings app opened", { skip: IS_WIN || process.platform !== "linux" }, async () => {
+  const c = await paired();
+  const r = await c.cmd({ op: "bluetoothSettings" });
+  assert.equal(r.ok, true);
+  assert.equal(typeof r.opened, "boolean");
   c.close();
 });

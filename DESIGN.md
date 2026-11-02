@@ -240,6 +240,34 @@ native code, so a separate program hosts them and Studio talks to it.
    with code 0. Anything else holding the port is still an error. A copy
    started `--bundled` never shows the note (orOS uses the one that answers).
 
+18. **TVs and speakers on the network (0.10.0).** orOS "Play on" (orOS Bible
+   CAST-1, approved 2026-11-02): a page cannot search the network, so the
+   bridge does (`src/cast.cpp`). SSDP `M-SEARCH` for
+   `urn:schemas-upnp-org:device:MediaRenderer:1` to 239.255.255.250:1900
+   (twice, 2.5 s, TTL 2), only when a paired page asks `renderers` with
+   `full` (or the first time); the list is kept. Each answer's `LOCATION`
+   must be `http://` to an IPv4 address in 10/8, 172.16/12, 192.168/16,
+   169.254/16 or 127/8; the description (at most 512 KB, 3 s) gives the name,
+   maker, model, UDN (the id, `upnp:<uuid>`) and the AVTransport and
+   RenderingControl control URLs, which must be on the same host and port
+   (relative ones are resolved against `URLBase` or the description). A
+   device without AVTransport is left out. Control is SOAP over plain HTTP
+   (`SetAVTransportURI` with DIDL-Lite metadata, `Play`, `Pause`, `Stop`,
+   `GetTransportInfo`, `SetVolume`/`GetVolume`), only to a device in the kept
+   list; a refused `SetAVTransportURI` gets `Stop` and one more try (some
+   TVs take a new address only when stopped). Only `http(s)` stream addresses
+   go out, every value is XML-escaped (the title twice, inside the metadata),
+   device text is cleaned (no control characters, at most 120 bytes). The
+   bridge listens on nothing new: the TV fetches the stream itself; files
+   stored in orOS would need the bridge to serve them on the network, which
+   waits for its own yes. No Google Cast (orOS rule 29, option A): Chromecast
+   goes through the browser's Remote Playback. `bluetoothSettings` opens the
+   system's Bluetooth page (`ms-settings:bluetooth`; on Linux the first of
+   GNOME Settings, KDE System Settings, Blueman, Blueberry). The calls run on
+   the page's session thread (a few seconds at most), never the plugin
+   thread. `--test-renderer HOST:PORT` sends the search to one more address,
+   for the fake TV in the tests.
+
 ## Protocol (WebSocket, `ws://127.0.0.1:47621/`)
 
 Text messages are JSON. A command carries `op` and an optional `id`; the
@@ -275,8 +303,13 @@ answer repeats the `id` and has `ok` (and `error` when false). Events have
 | `scanners` | `full`? | `scanners`: [{id, name, vendor, model, sources (`flatbed` \| `adf` \| `adf-duplex`), modes (`color` \| `gray` \| `lineart`), dpi}], `missing`: [{code, error}] for a backend that is not there (`nosane`) |
 | `scanStart` | `scanner`, `source`?, `mode`?, `dpi`? (50..1200; default flatbed, color, 300) | then `ORS1` strips, `scanProgress` {page, pct}, `scanPage` {page, width, height, channels} per page, and `scanDone` {pages, cancelled} or `scanError` {pages, code, error}; `code`: busy, nopaper, jammed, cover, denied, gone, unsupported, nosane, other |
 | `scanCancel` | | `scanning` |
+| `renderers` | `full`? | `renderers`: [{id, name, vendor, model, volume (it has a volume control)}] (0.10.0) |
+| `castStart` | `renderer`, `url` (http or https), `title`?, `kind`? (`audio` \| `video`), `mime`? | the device plays it; on failure `code` (notfound, unreachable, refused, badurl, other) and `error` |
+| `castControl` | `renderer`, `action` (`play` \| `pause` \| `stop` \| `volume`), `volume`? (0..100) | |
+| `castStatus` | `renderer` | `state` (playing, paused, stopped, loading, idle, other), `volume`? |
+| `bluetoothSettings` | | `opened`: whether a settings app was started |
 
-Events: `hello` {app, version, editors, scanner (0.9.0)} on connect, `scanning`,
+Events: `hello` {app, version, editors, scanner (0.9.0), cast (0.10.0)} on connect, `scanning`,
 `editorClosed`, `renderError` {h, seq, error}, `levels` {peaks (one per
 input channel), running, pos, live? {h, on, peak, slow, failed}}, `audioError` {offset, error} for a bad
 `ORP1` block.
@@ -345,6 +378,15 @@ test also scans through the real libsane with SANE's own `test` backend only
 (`SANE_CONFIG_DIR` with `dll.conf` = `test`): the list, a grey and a colour
 page from the glass, and the feeder until it is empty. WIA has no stand-in:
 it is built on Windows CI and needs a real scanner to test.
+The test also runs a fake TV (Node: a UDP port answering `M-SEARCH`, given
+with `--test-renderer`, and an HTTP server with a UPnP description and SOAP
+control): it is found with its name unescaped; a device whose control URL is
+on another host and one at a public address are left out; a stream goes in
+with its title escaped in the metadata, then plays, pauses, changes volume
+and stops; a TV that refuses a new address gets Stop and the address again;
+bad addresses (javascript:, file:, data:), unknown devices, bad actions and
+volumes never reach the TV. Real TVs, speakers and Windows' firewall need
+real hardware.
 `tests/update.test.js` runs a copy of the bridge against a local stand-in
 for GitHub: older, equal, newer and prerelease tags; an update that replaces
 the copy (Windows: the exe and the ASIO module, the old ones kept as `.old`;

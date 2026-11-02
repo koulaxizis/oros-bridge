@@ -28,6 +28,7 @@ private:
   nlohmann::json audioCommand(const std::string& op, const nlohmann::json& m);
   nlohmann::json liveCommand(const std::string& op, const nlohmann::json& m);
   nlohmann::json scanCommand(const std::string& op, const nlohmann::json& m);
+  nlohmann::json castCommand(const std::string& op, const nlohmann::json& m);
   void closeLive();   // with audioMu_ held
   void playBlock(const std::vector<uint8_t>& d);
   void meters();

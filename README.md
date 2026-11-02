@@ -131,6 +131,17 @@ network and USB multifunction printers that need no driver; the .deb and
 .rpm recommend them and orOS USB has them. `oros-bridge --scanners` lists the
 scanners it finds, and the window shows how many the last look found.
 
+### Play on a TV or speaker on the network (0.10.0)
+
+orOS Radio and Television can send a station or channel to a smart TV, Kodi,
+a network speaker or a receiver on your home network (UPnP/DLNA): the bridge
+looks for them when you open `Play on…` and sends the stream's address, play,
+pause, stop and the volume; the TV fetches the stream itself. Windows may ask
+once whether the bridge may use the private network. Chromecast is not
+searched by the bridge (orOS uses the browser's own Cast menu for it). The
+bridge can also open the system's Bluetooth settings, where a Bluetooth
+speaker is paired.
+
 ## Safety
 
 - It listens on `127.0.0.1` only, so other computers cannot reach it.
@@ -141,6 +152,9 @@ scanners it finds, and the window shows how many the last look found.
 - Plugins are programs: the bridge runs the ones you installed, as you.
 - A scanner scans only when a paired page asks; the pages go to that page
   only and the bridge keeps nothing.
+- TVs on the network: the bridge looks for them only when a paired page
+  asks, talks only to devices that answered at a home network address, sends
+  only http(s) stream addresses, and serves nothing to the network.
 
 ## Build
 
