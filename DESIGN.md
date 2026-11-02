@@ -90,7 +90,7 @@ native code, so a separate program hosts them and Studio talks to it.
    driver reports. While a card is open, listing returns the last list
    instead of loading other drivers. Wherever ASIO is named (this repo's
    docs, the release notes, Studio's sound card settings, the download
-   page), the ASIO Compatible Logo (`asio/logo/`) is shown with "ASIO is a
+   page), the ASIO Compatible Logo (`asio/logo/`) is shown, small (72 px high) and on its own line, with "ASIO is a
    registered trademark of Steinberg Media Technologies GmbH.", as the SDK's
    usage guidelines ask (decision 2026-10-31).
 
