@@ -223,6 +223,46 @@ private:
 };
 }
 
+// ---------- is a bridge already there? ----------
+bool bridgeAnswers(uint16_t port) {
+  if (!port) return false;
+#ifdef _WIN32
+  WSADATA wsa;
+  WSAStartup(MAKEWORD(2, 2), &wsa);
+#endif
+  auto s = socket(AF_INET, SOCK_STREAM, 0);
+  if (s == decltype(s)(-1)) return false;
+#ifdef _WIN32
+  DWORD ms = 2000;
+  setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&ms, sizeof ms);
+  setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&ms, sizeof ms);
+#else
+  timeval tv{2, 0};
+  setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+  setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+#endif
+  sockaddr_in a{};
+  a.sin_family = AF_INET;
+  a.sin_port = htons(port);
+  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  std::string got;
+  if (connect(s, (sockaddr*)&a, sizeof a) == 0) {
+    // the Origin every bridge accepts (the bundled one adds localhost:47800)
+    std::string req = "GET /status HTTP/1.1\r\nHost: 127.0.0.1:" + std::to_string(port) +
+                      "\r\nOrigin: https://useoros.online\r\nConnection: close\r\n\r\n";
+    if (sendAll(intptr_t(s), (const uint8_t*)req.data(), req.size())) {
+      char buf[1024];
+      for (;;) {
+        int k = ::recv(s, buf, sizeof buf, 0);
+        if (k <= 0 || got.size() > 4096) break;
+        got.append(buf, size_t(k));
+      }
+    }
+  }
+  CLOSESOCK(s);
+  return got.rfind("HTTP/1.1 200", 0) == 0 && got.find("\"app\":\"oros-bridge\"") != std::string::npos;
+}
+
 // ---------- server ----------
 Server::Server(ServerOptions opt, Config& cfg, Pairing& pairing) : opt_(std::move(opt)), cfg_(cfg), pairing_(pairing) {}
 

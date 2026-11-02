@@ -145,7 +145,7 @@ Api a;
 
 constexpr int kWindowToplevel = 0, kVertical = 1, kHorizontal = 0;
 constexpr int kDialogModal = 1 << 0, kDialogDestroyWithParent = 1 << 1;
-constexpr int kMessageQuestion = 2, kMessageError = 3, kButtonsOk = 1, kButtonsYesNo = 4, kResponseYes = -8;
+constexpr int kMessageInfo = 0, kMessageQuestion = 2, kMessageError = 3, kButtonsOk = 1, kButtonsYesNo = 4, kResponseYes = -8;
 constexpr int kIndicatorApplicationStatus = 0, kIndicatorActive = 1;
 
 template <class F>
@@ -161,6 +161,8 @@ struct Strings {
   const char *updOut, *updButton, *updPage, *updating, *updCheck, *updTray, *updDownload, *updChecksum, *updInstall, *updFiles;
   // 0.9.0: scanners (counted once a page has looked for them)
   const char* scanners;
+  // 0.9.1: the port is held by another bridge (often the one inside orOS)
+  const char* elsewhere;
 };
 const Strings kEn = {
     "Ready. Studio and Scan PDF can connect.",
@@ -191,6 +193,7 @@ const Strings kEn = {
     "The update was not installed.",
     "The program file could not be replaced.",
     "Scanners found: %d (for orOS Scan PDF)",
+    "orOS Bridge is already running on this computer, for example inside the orOS you installed. orOS Studio and Scan PDF use that one, so there is nothing to do here.",
 };
 const Strings kEl = {
     "Έτοιμο. Το Studio και το Scan PDF μπορούν να συνδεθούν.",
@@ -221,6 +224,7 @@ const Strings kEl = {
     "Η ενημέρωση δεν εγκαταστάθηκε.",
     "Το αρχείο του προγράμματος δεν μπόρεσε να αντικατασταθεί.",
     "Σαρωτές που βρέθηκαν: %d (για το orOS Scan PDF)",
+    "Το orOS Bridge τρέχει ήδη σε αυτόν τον υπολογιστή, για παράδειγμα μέσα στο orOS που εγκατέστησες. Το orOS Studio και το Scan PDF χρησιμοποιούν αυτό, οπότε δεν χρειάζεται να κάνεις τίποτα εδώ.",
 };
 const Strings& strings() {
   for (const char* v : {"LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"}) {
@@ -614,10 +618,11 @@ void guiPairingCode(const std::string&) {
   });
 }
 
-void guiError(const std::string& msg) {
+namespace {
+// a message box before MainLoop runs: a small loop of our own
+void messageBox(int type, const std::string& text) {
   if (!gtkReady()) return;
-  std::string text = std::string(strings().cannotStart) + "\n\n" + msg;
-  W d = a.gtk_message_dialog_new(nullptr, kDialogModal, kMessageError, kButtonsOk, "%s", text.c_str());
+  W d = a.gtk_message_dialog_new(nullptr, kDialogModal, type, kButtonsOk, "%s", text.c_str());
   a.gtk_window_set_title(d, "orOS Bridge");
   static bool done;
   done = false;
@@ -626,7 +631,7 @@ void guiError(const std::string& msg) {
   void* ctx = a.g_main_context_default();
   GlibGuest guest(ctx);
   std::vector<pollfd> fds;
-  while (!done) {   // before MainLoop runs: a small loop of our own
+  while (!done) {
     fds.clear();
     int t = guest.prepare(fds);
     poll(fds.data(), nfds_t(fds.size()), t);
@@ -634,6 +639,11 @@ void guiError(const std::string& msg) {
   }
   a.gtk_widget_destroy(d);
 }
+}
+
+void guiError(const std::string& msg) { messageBox(kMessageError, std::string(strings().cannotStart) + "\n\n" + msg); }
+
+void guiRunningElsewhere() { messageBox(kMessageInfo, strings().elsewhere); }
 
 int guiRun(Config& cfg, Server& server, Pairing& pairing, bool hidden) {
   g.cfg = &cfg;

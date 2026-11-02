@@ -32,6 +32,9 @@ back, as fast as the plugin goes, so nothing crackles on a busy computer.
    closing the window minimises it. Plugin windows open on X11 (or XWayland
    under Wayland). Without a desktop, or with `--console`, the bridge runs in
    the terminal.
+   If you installed orOS (or use orOS Portable), the bridge is already inside
+   it and you need nothing else: starting the downloaded bridge then only says
+   that one is already running (0.9.1).
 2. In Studio, open a track's settings and press `Plugin on this computer`. The bridge window shows a 6-digit code;
    type it in Studio once. Studio keeps a key, so next time it just connects.
 3. Studio lists your plugins (from `C:\Program Files\Common Files\VST3`,

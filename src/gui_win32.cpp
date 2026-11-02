@@ -34,6 +34,8 @@ struct Strings {
   const wchar_t *updOut, *updButton, *updPage, *updating, *updCheck, *updTray, *updDownload, *updChecksum, *updInstall, *updFiles;
   // 0.9.0: scanners (counted once a page has looked for them)
   const wchar_t* scanners;
+  // 0.9.1: the port is held by another bridge (often the one inside orOS)
+  const wchar_t* elsewhere;
 };
 const Strings kEn = {
     L"Ready. Studio and Scan PDF can connect.",
@@ -65,6 +67,7 @@ const Strings kEn = {
     L"The update was not installed.",
     L"The program file could not be replaced.",
     L"Scanners found: %d (for orOS Scan PDF)",
+    L"orOS Bridge is already running on this computer, for example inside the orOS you installed. orOS Studio and Scan PDF use that one, so there is nothing to do here.",
 };
 const Strings kEl = {
     L"Έτοιμο. Το Studio και το Scan PDF μπορούν να συνδεθούν.",
@@ -96,6 +99,7 @@ const Strings kEl = {
     L"Η ενημέρωση δεν εγκαταστάθηκε.",
     L"Το αρχείο του προγράμματος δεν μπόρεσε να αντικατασταθεί.",
     L"Σαρωτές που βρέθηκαν: %d (για το orOS Scan PDF)",
+    L"Το orOS Bridge τρέχει ήδη σε αυτόν τον υπολογιστή, για παράδειγμα μέσα στο orOS που εγκατέστησες. Το orOS Studio και το Scan PDF χρησιμοποιούν αυτό, οπότε δεν χρειάζεται να κάνεις τίποτα εδώ.",
 };
 
 const Strings& strings() {
@@ -492,6 +496,10 @@ void guiPairingCode(const std::string& code) {
 void guiError(const std::string& msg) {
   std::wstring text = std::wstring(strings().cannotStart) + L"\n\n" + wide(msg);
   MessageBoxW(nullptr, text.c_str(), kTitle, MB_OK | MB_ICONERROR);
+}
+
+void guiRunningElsewhere() {
+  MessageBoxW(nullptr, strings().elsewhere, kTitle, MB_OK | MB_ICONINFORMATION);
 }
 
 int guiRun(Config& cfg, Server& server, Pairing& pairing, bool hidden) {

@@ -192,6 +192,13 @@ int main(int argc, char** argv) {
   Server server(opt, cfg, pairing);
   std::string err;
   if (!server.listen(err)) {
+    // 0.9.1: the bridge inside orOS (Portable, the installers) holds the port; nothing is wrong
+    if (!bundled && bridgeAnswers(opt.port)) {
+      if (gui) guiRunningElsewhere();
+      std::cout << "orOS Bridge is already running on this computer (for example inside orOS); "
+                   "orOS Studio uses that one.\n" << std::flush;
+      return 0;
+    }
     if (gui) guiError(err);
     std::cerr << "orOS Bridge could not start: " << err << "\n";
     return 1;
