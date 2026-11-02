@@ -230,6 +230,16 @@ native code, so a separate program hosts them and Studio talks to it.
    `--test-scanner` adds a test scanner (below). The window now says "orOS is
    connected", since Studio and Scan PDF share the pairing.
 
+17. **Already running inside orOS (0.9.1).** orOS Portable and the orOS
+   installers run their own copy of the bridge (decision 15), which holds
+   port 47621. A person who also starts the downloaded bridge used to get
+   "could not start: port 47621 is in use". Now, when the port is taken, the
+   bridge asks `/status` on it (Origin `https://useoros.online`, 2 s limit);
+   if an orOS Bridge answers, it says in a note (not an error) that the
+   bridge already runs on this computer, for example inside orOS, and ends
+   with code 0. Anything else holding the port is still an error. A copy
+   started `--bundled` never shows the note (orOS uses the one that answers).
+
 ## Protocol (WebSocket, `ws://127.0.0.1:47621/`)
 
 Text messages are JSON. A command carries `op` and an optional `id`; the

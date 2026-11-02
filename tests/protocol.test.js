@@ -194,6 +194,19 @@ test("status: allowed origin only, on 127.0.0.1 or localhost only", async () => 
   assert.equal(status(await rawRequest(["GET /status HTTP/1.1", "Host: localhost:" + port, "Origin: https://useoros.online"])), 200);
 });
 
+test("a second bridge on the same port says the first one is running and ends without an error", async () => {
+  // 0.9.1: the bridge inside orOS holds 47621 and a person starts the downloaded one
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "oros-bridge-2-"));
+  const second = spawn(BRIDGE, ["--console", "--port", String(port), "--config-dir", dir], { stdio: ["ignore", "pipe", "pipe"] });
+  let text = "";
+  second.stdout.on("data", (d) => { text += d; });
+  second.stderr.on("data", (d) => { text += d; });
+  const code = await new Promise((res) => second.on("exit", res));
+  assert.equal(code, 0, text);
+  assert.match(text, /already running/);
+  assert.doesNotMatch(text, /could not start/);
+});
+
 test("websocket: refused from another origin or host", async () => {
   await assert.rejects(Client.open({ origin: "https://evil.example" }), /403/);
   await assert.rejects(Client.open({ origin: "null" }), /403/);

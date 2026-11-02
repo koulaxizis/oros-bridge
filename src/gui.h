@@ -21,4 +21,7 @@ void guiPairingCode(const std::string& code);
 int guiRun(Config& cfg, Server& server, Pairing& pairing, bool hidden);
 // A message box for errors before the window exists.
 void guiError(const std::string& msg);
+// The port is held by a bridge that answers (another copy, or the one inside
+// orOS): a friendly note instead of an error.
+void guiRunningElsewhere();
 }

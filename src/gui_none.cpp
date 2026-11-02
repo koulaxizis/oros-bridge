@@ -12,4 +12,5 @@ int guiRun(Config&, Server&, Pairing&, bool) {
   return 0;
 }
 void guiError(const std::string&) {}
+void guiRunningElsewhere() {}
 }

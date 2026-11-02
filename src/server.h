@@ -63,6 +63,9 @@ private:
   std::atomic<int> live_{0};
 };
 
+// An orOS Bridge (another copy, or the one inside orOS) answers /status on
+// 127.0.0.1:port; used to explain a port in use instead of failing.
+bool bridgeAnswers(uint16_t port);
 bool originAllowed(const std::vector<std::string>& allowed, const std::string& origin);
 bool hostAllowed(const std::string& host, uint16_t port);
 std::string wsAccept(const std::string& key);
