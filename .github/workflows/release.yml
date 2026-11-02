@@ -6,13 +6,41 @@
 # change between versions, so
 # https://github.com/koulaxizis/oros-bridge/releases/latest/download/oros-bridge-windows-x64.exe
 # always gives the newest published one (orOS links it).
+#
+# Since 0.10.0 it also starts by itself when a merge to main changes the
+# version in CMakeLists.txt (or this file), but only when no release with that tag exists
+# yet (a published release is never touched by the automatic run). It still
+# only leaves a draft: publishing stays the owner's step.
 name: release
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [CMakeLists.txt, .github/workflows/release.yml]
 permissions:
   contents: write
+concurrency:
+  group: release
+  cancel-in-progress: false
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.v.outputs.go }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=$(sed -n 's/.*project(oros_bridge VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          echo "version $v"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then echo "go=true" >> "$GITHUB_OUTPUT"
+          elif gh release view "v$v" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then echo "v$v exists: nothing to do"; echo "go=false" >> "$GITHUB_OUTPUT"
+          else echo "go=true" >> "$GITHUB_OUTPUT"; fi
   windows:
+    needs: version
+    if: needs.version.outputs.go == 'true'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
