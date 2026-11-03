@@ -1,0 +1,3 @@
+# The release tag to publish (see .github/workflows/publish.yml). Changed only
+# when the owner says "publish".
+v0.10.0

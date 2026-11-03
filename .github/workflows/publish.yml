@@ -1,0 +1,36 @@
+# Publishes a DRAFT release that release.yml made, when the owner asks for it
+# in the project chat and a merged PR writes that tag into .github/publish.txt.
+# It only turns a draft into a published release: it never builds, never
+# changes assets, never touches a release that is already published, and does
+# nothing when the tag has no draft. (Claude cannot press Publish itself; this
+# keeps that one step reviewable as a PR.)
+name: publish
+on:
+  push:
+    branches: [main]
+    paths: [.github/publish.txt]
+permissions:
+  contents: write
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(grep -Eo '^v[0-9]+\.[0-9]+\.[0-9]+$' .github/publish.txt | tail -n 1)
+          if [ -z "$tag" ]; then echo "no vX.Y.Z line in .github/publish.txt"; exit 1; fi
+          v=$(sed -n 's/.*project(oros_bridge VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          if [ "$tag" != "v$v" ]; then echo "$tag is not the version on main (v$v)"; exit 1; fi
+          draft=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null || echo missing)
+          if [ "$draft" = "missing" ]; then echo "no release $tag"; exit 1; fi
+          if [ "$draft" != "true" ]; then echo "$tag is already published: nothing to do"; exit 0; fi
+          n=$(gh release view "$tag" --json assets --jq '.assets | length')
+          if [ "$n" -lt 4 ]; then echo "$tag has only $n assets: the release run is not finished"; exit 1; fi
+          gh release edit "$tag" --draft=false --latest
+          echo "published $tag"
