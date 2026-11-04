@@ -17,6 +17,7 @@
 #include "scanner.h"
 #include "server.h"
 #include "update.h"
+#include "watch.h"
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -35,9 +36,12 @@ static const char* kUsage =
     "  --scan                      look for plugins, print them, exit\n"
     "  --forget-pairings           forget every paired browser, exit\n"
     "  --scanners                  look for scanners (WIA, SANE), print them, exit\n"
+    "  --watch DIR                 tell orOS about new files in DIR (kept; repeatable)\n"
     "  --test-audio                also offer a loopback sound card (tests)\n"
     "  --test-scanner              also offer a test scanner (tests)\n"
     "  --test-renderer HOST:PORT   also search for TVs at this address (tests)\n"
+    "  --test-print DIR            printing copies the file into DIR (tests)\n"
+    "  --test-pick FILE            the folder chooser answers the folder FILE names (tests)\n"
     "  --audio-module PATH         also offer the sound system in this library\n"
     "  --code-file PATH            keep the open pairing code in PATH (removed when none is open)\n"
     "  --bundled                   started by orOS (Portable, the installers): no window, no console,\n"
@@ -118,6 +122,7 @@ int main(int argc, char** argv) {
   bool bundled = false, checkUpdate = false, doUpdate = false;
   long afterUpdate = 0;
   std::string codeFile;
+  std::vector<std::string> watchDirs;
   std::string unknown;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -136,6 +141,9 @@ int main(int argc, char** argv) {
     else if (a == "--scanners") scannersOnly = true;
     else if (a == "--test-scanner") enableTestScanner();
     else if (a == "--test-renderer") cast::addTestTarget(next());
+    else if (a == "--watch") watchDirs.push_back(next());
+    else if (a == "--test-print") watch::setTestPrintDir(next());
+    else if (a == "--test-pick") watch::setPickTest(next());
     else if (a == "--forget-pairings") forget = true;
     else if (a == "--console") console = true;
     else if (a == "--tray") tray = true;
@@ -209,6 +217,13 @@ int main(int argc, char** argv) {
   std::cout << "orOS Bridge " OROS_BRIDGE_VERSION " is ready on 127.0.0.1:" << server.port() << "\n"
             << "Settings: " << cfg.dir() << "\n"
             << "Keep this window open while you use orOS Studio.\n" << std::flush;
+  watch::start(cfg);   // 0.11.0: watched folders
+  for (auto& d : watchDirs) {
+    std::string werr;
+    std::error_code ec;
+    auto abs = std::filesystem::absolute(std::filesystem::u8path(d), ec).u8string();
+    if (!watch::add(abs, werr)) std::cerr << "--watch " << d << ": " << werr << "\n";
+  }
   std::thread net([&] { server.run(); });
   if (!codeFile.empty()) std::thread(followCode, std::ref(pairing), codeFile).detach();
   if (gui) {

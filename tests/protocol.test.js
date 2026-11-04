@@ -20,6 +20,7 @@ const IS_WIN = process.platform === "win32";
 const EDITORS = IS_WIN || (process.platform === "linux" && !!process.env.DISPLAY);
 
 let proc, port, codeFile, out = "";
+let watchA, watchB, printDir, pickFile;   // watched folders (0.11.0)
 
 async function waitFor(cond, what, ms = 2000) {
   const end = Date.now() + ms;
@@ -110,11 +111,18 @@ test.before(async () => {
   const args = ["--console", "--port", "0", "--config-dir", dir, "--allow-origin", ORIGIN, "--test-audio", "--test-scanner", "--code-file", codeFile];
   if (process.env.OROS_TEST_AUDIO_MODULE) args.push("--audio-module", process.env.OROS_TEST_AUDIO_MODULE);
   args.push("--test-renderer", "127.0.0.1:" + (await startFakeTv()));
+  // watched folders: A from the start (old.pdf there before is never reported), B chosen later
+  watchA = path.join(dir, "watch A"); watchB = path.join(dir, "watch-b"); printDir = path.join(dir, "printed");
+  pickFile = path.join(dir, "pick.txt");
+  for (const d of [watchA, watchB, printDir, path.join(watchA, "sub")]) fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(watchA, "old.pdf"), "%PDF-old");
+  fs.writeFileSync(pickFile, "");
+  args.push("--watch", watchA, "--test-print", printDir, "--test-pick", pickFile);
   // SANE: only its own `test` backend (OROS_TEST_SANE=1, Linux CI with libsane1), or no SANE backend at all
   const saneDir = path.join(dir, "sane");
   fs.mkdirSync(saneDir);
   fs.writeFileSync(path.join(saneDir, "dll.conf"), process.env.OROS_TEST_SANE ? "test\n" : "");
-  proc = spawn(BRIDGE, args, { stdio: ["ignore", "pipe", "inherit"], env: Object.assign({}, process.env, { SANE_CONFIG_DIR: saneDir }) });
+  proc = spawn(BRIDGE, args, { stdio: ["ignore", "pipe", "inherit"], env: Object.assign({}, process.env, { SANE_CONFIG_DIR: saneDir, OROS_BRIDGE_WATCH_MS: "100" }) });
   await new Promise((res, rej) => {
     proc.on("exit", (c) => rej(new Error("bridge exited " + c)));
     proc.stdout.on("data", (d) => {
@@ -142,11 +150,11 @@ function rawRequest(lines) {
 function status(text) { return +(/^HTTP\/1\.1 (\d+)/.exec(text) || [])[1]; }
 
 class Client {
-  static open({ origin = ORIGIN, host = "127.0.0.1:" + port } = {}) {
+  static open({ origin = ORIGIN, at = port, host = "127.0.0.1:" + at } = {}) {
     return new Promise((res, rej) => {
       const c = new Client();
       const key = crypto.randomBytes(16).toString("base64");
-      c.s = net.connect(port, "127.0.0.1", () => {
+      c.s = net.connect(at, "127.0.0.1", () => {
         c.s.write(["GET / HTTP/1.1", "Host: " + host, "Origin: " + origin, "Upgrade: websocket", "Connection: Upgrade",
           "Sec-WebSocket-Key: " + key, "Sec-WebSocket-Version: 13", "", ""].join("\r\n"));
       });
@@ -247,8 +255,8 @@ class Client {
 }
 
 let token;
-async function paired() {
-  const c = await Client.open();
+async function paired(at = port) {
+  const c = await Client.open({ at });
   assert.equal((await c.cmd({ op: "auth", token })).ok, true);
   return c;
 }
@@ -956,4 +964,177 @@ test("cast: Bluetooth settings answer whether a settings app opened", { skip: IS
   assert.equal(r.ok, true);
   assert.equal(typeof r.opened, "boolean");
   c.close();
+});
+
+// ---- watched folders (0.11.0) ----
+// the next fileNew event (other messages are skipped), or null after ms
+async function fileNew(c, ms = 3000) {
+  const end = Date.now() + ms;
+  for (;;) {
+    const left = end - Date.now();
+    if (left <= 0) return null;
+    const m = await Promise.race([c.next(), new Promise((r) => setTimeout(() => r("timeout"), left))]);
+    if (m === "timeout") {
+      // the waiter stays in the queue; take it out so a later message is not lost
+      c.waiters.pop();
+      return null;
+    }
+    if (m && m.event === "fileNew") return m.file;
+  }
+}
+async function readFile(c, key, chunk = 5) {
+  const parts = [];
+  for (let off = 0; ; ) {
+    const id = (c.id = (c.id || 0) + 1);
+    c.send(JSON.stringify({ id, op: "fileRead", key, offset: off, length: chunk }), 1);
+    let bin = null, r;
+    for (;;) {
+      const m = await c.next();
+      if (Buffer.isBuffer(m)) bin = m;
+      else if (m && m.id === id) { r = m; break; }
+    }
+    if (!r.ok) return r;
+    assert.equal(bin.slice(0, 4).toString(), "ORF1");
+    assert.equal(bin.readUInt32LE(4), off);
+    assert.equal(bin.readUInt32LE(8), bin.length - 12);
+    parts.push(bin.slice(12));
+    off += bin.length - 12;
+    if (off >= r.size || bin.length === 12) return Buffer.concat(parts);
+  }
+}
+
+test("watch: hello says so, nothing before pairing, the folder from --watch is listed", async () => {
+  const c = await Client.open();
+  assert.equal((await c.next()).watch, true);
+  for (const op of ["watched", "watchPick", "watchRemove", "fileRead", "print"]) assert.equal((await c.cmd({ op })).error, "not paired", op);
+  assert.equal((await c.cmd({ op: "auth", token })).ok, true);
+  const w = await c.cmd({ op: "watched" });
+  assert.deepEqual(w.folders, [{ path: watchA, ok: true }]);
+  assert.deepEqual(w.files, [], "old.pdf was there before: never reported");
+  c.close();
+});
+
+test("watch: a new file is reported once it is written, read back exactly, printed", async () => {
+  const c = await paired();
+  await sleep(300);
+  // temporary, hidden and lock files and files in folders below never count
+  for (const n of [".hidden.pdf", "photo.jpg.crdownload", "~$report.docx", "x.tmp", "Thumbs.db"]) fs.writeFileSync(path.join(watchA, n), "x");
+  fs.writeFileSync(path.join(watchA, "sub", "deep.pdf"), "x");
+  if (!IS_WIN) {   // a link to a file elsewhere is not followed
+    const outside = path.join(path.dirname(watchA), "outside.pdf");
+    fs.writeFileSync(outside, "%PDF-secret");
+    fs.symlinkSync(outside, path.join(watchA, "link.pdf"));
+  }
+  // written in pieces, slower than a look: reported once, whole
+  const body = Buffer.from("%PDF-1.7 " + "x".repeat(200) + " %%EOF");
+  const fd = fs.openSync(path.join(watchA, "Scan 1.pdf"), "w");
+  for (let i = 0; i < body.length; i += 50) { fs.writeSync(fd, body.slice(i, i + 50)); await sleep(60); }
+  fs.closeSync(fd);
+  const f = await fileNew(c);
+  assert.ok(f, "reported");
+  assert.equal(f.name, "Scan 1.pdf");
+  assert.equal(f.folder, watchA);
+  assert.equal(f.kind, "pdf");
+  assert.equal(f.size, body.length);
+  assert.match(f.key, /^[0-9a-f]{16}$/);
+  assert.equal(await fileNew(c, 600), null, "nothing else was reported");
+  assert.deepEqual((await c.cmd({ op: "watched" })).files.map((x) => x.name), ["Scan 1.pdf"]);
+  // a photo
+  fs.writeFileSync(path.join(watchA, "IMG_0001.JPG"), Buffer.from([0xff, 0xd8, 0xff, 1, 2, 3]));
+  const p = await fileNew(c);
+  assert.deepEqual([p.name, p.kind, p.size], ["IMG_0001.JPG", "image", 6]);
+  // read back in chunks of 5 bytes
+  assert.deepEqual(await readFile(c, f.key), body);
+  assert.deepEqual(await readFile(c, p.key, 1 << 20), Buffer.from([0xff, 0xd8, 0xff, 1, 2, 3]));
+  // print: the test printer keeps a copy
+  const pr = await c.cmd({ op: "print", key: f.key });
+  assert.equal(pr.ok, true, JSON.stringify(pr));
+  assert.deepEqual(fs.readFileSync(path.join(printDir, "Scan 1.pdf")), body);
+  // the same name written again: reported again with a new key; the old key is "changed"
+  await sleep(50);
+  fs.writeFileSync(path.join(watchA, "Scan 1.pdf"), "%PDF-second");
+  const again = await fileNew(c);
+  assert.equal(again.name, "Scan 1.pdf");
+  assert.notEqual(again.key, f.key);
+  assert.equal(again.size, 11);
+  assert.equal((await c.cmd({ op: "fileRead", key: f.key })).code, "changed");
+  assert.equal((await c.cmd({ op: "print", key: f.key })).code, "changed");
+  // gone: not found
+  fs.unlinkSync(path.join(watchA, "IMG_0001.JPG"));
+  assert.equal((await c.cmd({ op: "fileRead", key: p.key })).code, "notfound");
+  c.close();
+});
+
+test("watch: the chooser adds a folder, cancel adds nothing, a folder taken off is quiet", async () => {
+  const c = await paired();
+  fs.writeFileSync(path.join(watchB, "before.png"), "png");
+  fs.writeFileSync(pickFile, "");
+  const no = await c.cmd({ op: "watchPick", lang: "el" });
+  assert.deepEqual([no.ok, no.cancelled], [true, true]);
+  fs.writeFileSync(pickFile, watchB);
+  const yes = await c.cmd({ op: "watchPick" });
+  assert.equal(yes.ok, true, JSON.stringify(yes));
+  assert.equal(yes.folder, watchB);
+  assert.deepEqual(yes.folders.map((x) => x.path), [watchA, watchB]);
+  await sleep(300);
+  fs.writeFileSync(path.join(watchB, "new.webp"), "webp");
+  const f = await fileNew(c);
+  assert.deepEqual([f.folder, f.name, f.kind], [watchB, "new.webp", "image"]);
+  // taken off: its files are no longer readable or reported
+  const r = await c.cmd({ op: "watchRemove", folder: watchB });
+  assert.deepEqual([r.ok, r.removed], [true, true]);
+  assert.deepEqual(r.folders.map((x) => x.path), [watchA]);
+  assert.equal((await c.cmd({ op: "fileRead", key: f.key })).code, "notfound");
+  fs.writeFileSync(path.join(watchB, "later.pdf"), "x");
+  assert.equal(await fileNew(c, 600), null);
+  assert.equal((await c.cmd({ op: "watchRemove", folder: watchB })).removed, false);
+  c.close();
+});
+
+test("watch: bad requests are refused, nothing outside a watched folder is reachable", async () => {
+  const c = await paired();
+  for (const key of [undefined, 5, "", "../../etc/passwd", "ABCDEF0123456789", "0123456789abcde"]) {
+    assert.equal((await c.cmd({ op: "fileRead", key })).ok, false, String(key));
+    assert.equal((await c.cmd({ op: "print", key })).ok, false, String(key));
+  }
+  assert.equal((await c.cmd({ op: "fileRead", key: "0123456789abcdef" })).code, "notfound");
+  const f = (await c.cmd({ op: "watched" })).files[0];
+  for (const range of [{ offset: -1 }, { length: 0 }, { length: 5 * 1024 * 1024 }, { offset: "a" }])
+    assert.equal((await c.cmd(Object.assign({ op: "fileRead", key: f.key }, range))).ok, false, JSON.stringify(range));
+  assert.equal((await c.cmd({ op: "watchRemove" })).ok, false);
+  assert.equal((await c.cmd({ op: "watchRemove", folder: 3 })).ok, false);
+  // a page never names a folder to add: only the chooser does
+  assert.equal((await c.cmd({ op: "watchAdd", folder: os.tmpdir() })).ok, false);
+  assert.deepEqual((await c.cmd({ op: "watched" })).folders.map((x) => x.path), [watchA]);
+  c.close();
+});
+
+test("watch: files added while the bridge was off are reported at its next start", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "oros-bridge-watch-"));
+  const folder = path.join(dir, "inbox");
+  fs.mkdirSync(folder);
+  const last = Date.now() - 60000;   // the last look, a minute ago
+  fs.writeFileSync(path.join(folder, "older.pdf"), "a");
+  fs.utimesSync(path.join(folder, "older.pdf"), new Date(last - 60000), new Date(last - 60000));
+  fs.writeFileSync(path.join(folder, "while off.pdf"), "b");
+  fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify({ tokens: [crypto.createHash("sha1").update("oros-bridge:" + token).digest("hex")], watch: [{ path: folder, upto: last }] }));
+  const p = spawn(BRIDGE, ["--console", "--port", "0", "--config-dir", dir, "--allow-origin", ORIGIN], { stdio: ["ignore", "pipe", "inherit"], env: Object.assign({}, process.env, { OROS_BRIDGE_WATCH_MS: "100" }) });
+  try {
+    const at = await new Promise((res, rej) => {
+      let o = "";
+      p.on("exit", (code) => rej(new Error("bridge exited " + code)));
+      p.stdout.on("data", (d) => { o += d; const m = /ready on 127\.0\.0\.1:(\d+)/.exec(o); if (m) res(+m[1]); });
+    });
+    const c = await paired(at);
+    let files = [];
+    const end = Date.now() + 3000;
+    while (Date.now() < end && !files.length) { await sleep(100); files = (await c.cmd({ op: "watched" })).files; }
+    assert.deepEqual(files.map((x) => x.name), ["while off.pdf"]);
+    c.close();
+    const saved = JSON.parse(fs.readFileSync(path.join(dir, "config.json"), "utf8")).watch;
+    assert.equal(saved[0].path, folder);
+    assert.ok(saved[0].upto > last, "the last look is kept");
+  } finally {
+    p.kill();
+  }
 });

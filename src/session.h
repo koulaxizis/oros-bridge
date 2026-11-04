@@ -29,6 +29,8 @@ private:
   nlohmann::json liveCommand(const std::string& op, const nlohmann::json& m);
   nlohmann::json scanCommand(const std::string& op, const nlohmann::json& m);
   nlohmann::json castCommand(const std::string& op, const nlohmann::json& m);
+  nlohmann::json watchCommand(const std::string& op, const nlohmann::json& m);
+  void paired();   // authed_ is now true: hear about new files
   void closeLive();   // with audioMu_ held
   void playBlock(const std::vector<uint8_t>& d);
   void meters();
@@ -56,6 +58,7 @@ private:
   std::mutex scanMu_;
   std::thread scanThread_;
   std::atomic<bool> scanCancel_{false}, scanning_{false};
+  int watchListener_ = 0;   // watched folders (0.11.0): fileNew events
 };
 
 constexpr size_t kMaxOpen = 64;

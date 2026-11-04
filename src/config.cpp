@@ -197,6 +197,17 @@ void Config::setUpdateCheck(bool on) {
   save();
 }
 
+nlohmann::json Config::watchList() {
+  std::lock_guard<std::mutex> g(mu_);
+  auto v = data_.find("watch");
+  return v != data_.end() && v->is_array() ? *v : nlohmann::json::array();
+}
+
+void Config::setWatchList(const nlohmann::json& list) {
+  { std::lock_guard<std::mutex> g(mu_); data_["watch"] = list; }
+  save();
+}
+
 const PluginInfo* Config::find(const std::string& id, PluginInfo& out) {
   for (auto& p : plugins())
     if (p.id == id) { out = p; return &out; }

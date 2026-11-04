@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
 #include <thread>
 #include "base64.h"
 #include "cast.h"
@@ -9,16 +10,18 @@
 #include "mainloop.h"
 #include "scan.h"
 #include "scanner.h"
+#include "watch.h"
 
 namespace ob {
 
 Session::Session(Connection& conn, Config& cfg, Pairing& pairing) : conn_(conn), cfg_(cfg), pairing_(pairing) {
   nlohmann::json hello = {{"event", "hello"}, {"app", "oros-bridge"}, {"version", OROS_BRIDGE_VERSION},
-                          {"editors", EditorWindow::supported()}, {"scanner", true}, {"cast", true}};
+                          {"editors", EditorWindow::supported()}, {"scanner", true}, {"cast", true}, {"watch", true}};
   conn_.sendText(hello.dump());
 }
 
 Session::~Session() {
+  if (watchListener_) watch::unlisten(watchListener_);   // before anything goes: no event is sent after this
   scanCancel_ = true;
   {
     std::lock_guard<std::mutex> g(scanMu_);
@@ -68,6 +71,14 @@ void Session::onText(const std::string& text) {
 
 static nlohmann::json fail(const std::string& e) { return {{"ok", false}, {"error", e}}; }
 
+void Session::paired() {
+  authed_ = true;
+  if (!watchListener_)
+    watchListener_ = watch::listen([this](const WatchedFile& f) {
+      conn_.sendText(nlohmann::json{{"event", "fileNew"}, {"file", f}}.dump());
+    });
+}
+
 nlohmann::json Session::command(const nlohmann::json& m) {
   const std::string op = m["op"];
   // ----- before the page is known -----
@@ -81,11 +92,11 @@ nlohmann::json Session::command(const nlohmann::json& m) {
       std::this_thread::sleep_for(std::chrono::milliseconds(500));   // slows down guessing
       return fail(pairing_.active() ? "wrong code" : "wrong code, ask for a new one");
     }
-    authed_ = true;
+    paired();
     return {{"ok", true}, {"token", token}};
   }
   if (op == "auth") {
-    authed_ = cfg_.hasToken(m.value("token", ""));
+    if (cfg_.hasToken(m.value("token", ""))) paired();
     if (!authed_) std::this_thread::sleep_for(std::chrono::milliseconds(500));
     return authed_ ? nlohmann::json{{"ok", true}} : fail("unknown token");
   }
@@ -119,6 +130,7 @@ nlohmann::json Session::command(const nlohmann::json& m) {
   if (op.rfind("live", 0) == 0 || op.rfind("midi", 0) == 0) return liveCommand(op, m);
   if (op == "scanners" || op == "scanStart" || op == "scanCancel") return scanCommand(op, m);
   if (op == "renderers" || op.rfind("cast", 0) == 0 || op == "bluetoothSettings") return castCommand(op, m);
+  if (op.rfind("watch", 0) == 0 || op == "fileRead" || op == "print") return watchCommand(op, m);
 
   // ----- open plugins -----
   if (op == "open") {
@@ -642,6 +654,59 @@ nlohmann::json Session::castCommand(const std::string& op, const nlohmann::json&
     nlohmann::json out = {{"ok", true}, {"state", state}};
     if (vol >= 0) out["volume"] = vol;
     return out;
+  }
+  return fail("unknown op");
+}
+
+// Watched folders (0.11.0): the list, the system's chooser (the person
+// picks; a page never names a folder to add), taking one off, reading and
+// printing a file the bridge reported. Nothing else on the disk is reachable.
+static nlohmann::json watchedList() {
+  auto folders = nlohmann::json::array();
+  for (auto& f : watch::folders()) {
+    std::error_code ec;
+    folders.push_back({{"path", f}, {"ok", std::filesystem::is_directory(std::filesystem::u8path(f), ec)}});
+  }
+  return folders;
+}
+
+nlohmann::json Session::watchCommand(const std::string& op, const nlohmann::json& m) {
+  if (op == "watched") return {{"ok", true}, {"folders", watchedList()}, {"files", watch::recent()}};
+  if (op == "watchPick") {
+    std::string lang = m.value("lang", "en"), path, err;
+    if (lang != "el") lang = "en";
+    if (!watch::pick(lang, path, err)) return {{"ok", false}, {"code", err}, {"error", err == "busy" ? "a folder chooser is already open" : "no folder chooser on this computer"}};
+    if (path.empty()) return {{"ok", true}, {"cancelled", true}, {"folders", watchedList()}};
+    if (!watch::add(path, err)) return {{"ok", false}, {"code", "bad"}, {"error", err}};
+    return {{"ok", true}, {"folder", path}, {"folders", watchedList()}};
+  }
+  if (op == "watchRemove") {
+    if (!m.contains("folder") || !m["folder"].is_string()) return fail("bad folder");
+    bool removed = watch::remove(m["folder"]);
+    return {{"ok", true}, {"removed", removed}, {"folders", watchedList()}};
+  }
+  if (!m.contains("key") || !m["key"].is_string()) return fail("bad key");
+  std::string key = m["key"];
+  if (key.size() != 16 || key.find_first_not_of("0123456789abcdef") != std::string::npos) return fail("bad key");
+  std::string err;
+  if (op == "fileRead") {
+    double off = m.value("offset", 0.0), len = m.value("length", double(watch::kMaxChunk));
+    if (!(off >= 0 && off <= 1e15) || !(len >= 1 && len <= watch::kMaxChunk)) return fail("bad range");
+    std::vector<uint8_t> data;
+    uint64_t size = 0;
+    if (!watch::read(key, uint64_t(off), uint32_t(len), data, size, err)) return {{"ok", false}, {"code", err}, {"error", "the file cannot be read: " + err}, {"size", size}};
+    // "ORF1" | u32 offset | u32 length | bytes, then the answer
+    std::vector<uint8_t> b(12 + data.size());
+    std::memcpy(b.data(), "ORF1", 4);
+    uint32_t o32 = uint32_t(off), n32 = uint32_t(data.size());
+    for (int i = 0; i < 4; i++) { b[4 + i] = uint8_t(o32 >> (8 * i)); b[8 + i] = uint8_t(n32 >> (8 * i)); }
+    if (!data.empty()) std::memcpy(b.data() + 12, data.data(), data.size());
+    conn_.sendBinary(b);
+    return {{"ok", true}, {"size", size}, {"offset", o32}, {"length", n32}};
+  }
+  if (op == "print") {
+    if (!watch::print(key, err)) return {{"ok", false}, {"code", err}, {"error", "the file was not printed: " + err}};
+    return {{"ok", true}, {"printed", true}};
   }
   return fail("unknown op");
 }

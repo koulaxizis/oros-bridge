@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <string>
 #include <thread>
@@ -24,6 +25,7 @@
 #include "scan.h"
 #include "scanner.h"
 #include "update.h"
+#include "watch.h"
 
 namespace ob {
 namespace {
@@ -87,6 +89,10 @@ struct Api {
   gboolean (*gtk_check_menu_item_get_active)(W);
   W (*gtk_separator_menu_item_new)();
   void (*gtk_menu_shell_append)(W, W);
+  // 0.11.0: the folder chooser
+  W (*gtk_file_chooser_dialog_new)(const char*, W, int, const char*, ...);
+  char* (*gtk_file_chooser_get_filename)(W);
+  void (*g_free)(void*);
   // app indicator (optional)
   void* (*app_indicator_new_with_path)(const char*, const char*, int, const char*) = nullptr;
   void (*app_indicator_set_status)(void*, int) = nullptr;
@@ -118,6 +124,7 @@ struct Api {
     G(gtk_widget_set_size_request); G(gtk_widget_set_can_focus); G(gtk_message_dialog_new); G(gtk_menu_new); G(gtk_menu_item_new_with_label); G(gtk_menu_item_set_label);
     G(gtk_check_menu_item_new_with_label); G(gtk_check_menu_item_set_active); G(gtk_check_menu_item_get_active);
     G(gtk_separator_menu_item_new); G(gtk_menu_shell_append);
+    G(gtk_file_chooser_dialog_new); G(gtk_file_chooser_get_filename); G(g_free);
 #undef G
     if (!ok) return false;
     for (const char* name : {"libayatana-appindicator3.so.1", "libappindicator3.so.1"}) {
@@ -146,6 +153,7 @@ Api a;
 constexpr int kWindowToplevel = 0, kVertical = 1, kHorizontal = 0;
 constexpr int kDialogModal = 1 << 0, kDialogDestroyWithParent = 1 << 1;
 constexpr int kMessageInfo = 0, kMessageQuestion = 2, kMessageError = 3, kButtonsOk = 1, kButtonsYesNo = 4, kResponseYes = -8;
+constexpr int kChooseFolder = 2, kResponseAccept = -3, kResponseCancel = -6, kMessageWarning = 1;
 constexpr int kIndicatorApplicationStatus = 0, kIndicatorActive = 1;
 
 template <class F>
@@ -163,6 +171,8 @@ struct Strings {
   const char* scanners;
   // 0.9.1: the port is held by another bridge (often the one inside orOS)
   const char* elsewhere;
+  // 0.11.0: folders orOS watches
+  const char *watchLabel, *watchAdd, *watchRemove, *watchBad, *watchTitle, *choose, *cancel;
 };
 const Strings kEn = {
     "Ready. Studio and Scan PDF can connect.",
@@ -194,6 +204,13 @@ const Strings kEn = {
     "The program file could not be replaced.",
     "Scanners found: %d (for orOS Scan PDF)",
     "orOS Bridge is already running on this computer, for example inside the orOS you installed. orOS Studio and Scan PDF use that one, so there is nothing to do here.",
+    "Folders orOS watches (new files for Automations):",
+    "Add folder…",
+    "Stop watching",
+    "This folder cannot be watched:",
+    "A folder for orOS to watch",
+    "Choose",
+    "Cancel",
 };
 const Strings kEl = {
     "Έτοιμο. Το Studio και το Scan PDF μπορούν να συνδεθούν.",
@@ -225,6 +242,13 @@ const Strings kEl = {
     "Το αρχείο του προγράμματος δεν μπόρεσε να αντικατασταθεί.",
     "Σαρωτές που βρέθηκαν: %d (για το orOS Scan PDF)",
     "Το orOS Bridge τρέχει ήδη σε αυτόν τον υπολογιστή, για παράδειγμα μέσα στο orOS που εγκατέστησες. Το orOS Studio και το Scan PDF χρησιμοποιούν αυτό, οπότε δεν χρειάζεται να κάνεις τίποτα εδώ.",
+    "Φάκελοι που παρακολουθεί το orOS (νέα αρχεία για τους Αυτοματισμούς):",
+    "Προσθήκη φακέλου…",
+    "Διακοπή",
+    "Αυτός ο φάκελος δεν μπορεί να παρακολουθηθεί:",
+    "Φάκελος που θα παρακολουθεί το orOS",
+    "Επιλογή",
+    "Άκυρο",
 };
 const Strings& strings() {
   for (const char* v : {"LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"}) {
@@ -271,6 +295,9 @@ struct Gui {
   int shownLive = -1;
   std::atomic<bool> scanning{false};
   std::string iconDir, iconFile;
+  W watchBox = nullptr;              // 0.11.0: one row per watched folder
+  std::vector<W> watchRows;
+  int shownWatch = 0;
 };
 Gui g;
 
@@ -435,6 +462,76 @@ void runUpdate() {
   refreshUpdate();
 }
 
+W label(const char* text, bool wrap = false);
+
+// ---------- watched folders (0.11.0) ----------
+// The chooser, also for a page's watchPick while the window runs: a dialog
+// answered through its "response" signal (never gtk_dialog_run, see askForget).
+void chooseFolder(const std::string& lang, std::function<void(int, std::string)> done) {
+  MainLoop::get().post([lang, done] {
+    const Strings& s = lang == "el" ? kEl : kEn;
+    W d = a.gtk_file_chooser_dialog_new(s.watchTitle, g.win, kChooseFolder, s.cancel, kResponseCancel, s.choose, kResponseAccept, nullptr);
+    if (!d) { done(-1, ""); return; }
+    auto* cb = new std::function<void(int, std::string)>(done);
+    on(d, "response", +[](W dlg, int response, gpointer data) {
+      auto* f = static_cast<std::function<void(int, std::string)>*>(data);
+      std::string path;
+      if (response == kResponseAccept) {
+        char* p = a.gtk_file_chooser_get_filename(dlg);
+        if (p) { path = p; a.g_free(p); }
+      }
+      a.gtk_widget_destroy(dlg);
+      (*f)(path.empty() ? 0 : 1, path);
+      delete f;
+    }, cb);
+    a.gtk_widget_show_all(d);
+    a.gtk_window_present(d);
+  });
+}
+
+void refreshWatch() {
+  int v = watch::version();
+  if (v == g.shownWatch || !g.watchBox) return;
+  g.shownWatch = v;
+  for (W r : g.watchRows) a.gtk_widget_destroy(r);
+  g.watchRows.clear();
+  for (auto& f : watch::folders()) {
+    W row = a.gtk_box_new(kHorizontal, 8);
+    W l = label(f.c_str());
+    a.gtk_label_set_selectable(l, 1);
+    a.gtk_widget_set_can_focus(l, 0);
+    a.gtk_label_set_line_wrap(l, 1);
+    W b = a.gtk_button_new_with_label(g.s->watchRemove);
+    auto* path = new std::string(f);   // freed with the row (below): the rows live until the list changes
+    on(b, "clicked", +[](W, gpointer data) {
+      std::string p = *static_cast<std::string*>(data);
+      MainLoop::get().post([p] { watch::remove(p); refreshWatch(); });
+    }, path);
+    on(b, "destroy", +[](W, gpointer data) { delete static_cast<std::string*>(data); }, path);
+    a.gtk_box_pack_start(row, l, 1, 1, 0);
+    a.gtk_box_pack_end(row, b, 0, 0, 0);
+    a.gtk_box_pack_start(g.watchBox, row, 0, 0, 0);
+    a.gtk_widget_show_all(row);
+    g.watchRows.push_back(row);
+  }
+}
+
+void addWatch() {
+  watch::pickAsync(g.s == &kEl ? "el" : "en", [](int st, std::string path) {
+    if (st != 1) return;
+    MainLoop::get().post([path] {
+      std::string err;
+      if (!watch::add(path, err)) {
+        W d = a.gtk_message_dialog_new(g.win, kDialogDestroyWithParent, kMessageWarning, kButtonsOk, "%s\n%s\n\n%s", g.s->watchBad, path.c_str(), err.c_str());
+        a.gtk_window_set_title(d, "orOS Bridge");
+        on(d, "response", +[](W dlg, int, gpointer) { a.gtk_widget_destroy(dlg); });
+        a.gtk_widget_show_all(d);
+      }
+      refreshWatch();
+    });
+  });
+}
+
 void askForget() {
   // not gtk_dialog_run: a nested loop would stop MainLoop (and every plugin call) until it is answered
   W d = a.gtk_message_dialog_new(g.win, kDialogModal | kDialogDestroyWithParent, kMessageQuestion, kButtonsYesNo, "%s", g.s->forgetAsk);
@@ -446,7 +543,7 @@ void askForget() {
   a.gtk_widget_show_all(d);
 }
 
-W label(const char* text, bool wrap = false) {
+W label(const char* text, bool wrap) {
   W l = a.gtk_label_new(text);
   a.gtk_label_set_xalign(l, 0);
   if (wrap) a.gtk_label_set_line_wrap(l, 1);
@@ -489,6 +586,16 @@ void createWindow() {
   a.gtk_box_pack_start(row, g.scan, 0, 0, 0);
   a.gtk_box_pack_start(row, forget, 0, 0, 0);
   a.gtk_box_pack_start(box, row, 0, 0, 4);
+
+  // 0.11.0: the folders orOS hears about; only the person here adds one
+  a.gtk_box_pack_start(box, label(s.watchLabel, true), 0, 0, 0);
+  g.watchBox = a.gtk_box_new(kVertical, 4);
+  a.gtk_box_pack_start(box, g.watchBox, 0, 0, 0);
+  W watchRow = a.gtk_box_new(kHorizontal, 8);
+  W watchAdd = a.gtk_button_new_with_label(s.watchAdd);
+  on(watchAdd, "clicked", +[](W, gpointer) { addWatch(); });
+  a.gtk_box_pack_start(watchRow, watchAdd, 0, 0, 0);
+  a.gtk_box_pack_start(box, watchRow, 0, 0, 4);
 
   g.updRow = a.gtk_box_new(kHorizontal, 8);
   g.updText = label("", true);
@@ -657,6 +764,7 @@ int guiRun(Config& cfg, Server& server, Pairing& pairing, bool hidden) {
   writeIcon();
   createWindow();
   createTray();
+  watch::setPicker(chooseFolder);   // a page's watchPick uses this window's chooser
   if (autostartOn()) setAutostart(true);   // follow the program if it was moved
   else setAutostart(false);
   refreshStatus();
@@ -665,6 +773,7 @@ int guiRun(Config& cfg, Server& server, Pairing& pairing, bool hidden) {
     refreshStatus();
     refreshPlugins();
     refreshUpdate();
+    refreshWatch();
   });
   if (instanceFd >= 0)
     MainLoop::get().addFd(instanceFd, POLLIN, [](int fd, short) {
