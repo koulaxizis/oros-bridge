@@ -268,6 +268,46 @@ native code, so a separate program hosts them and Studio talks to it.
    thread. `--test-renderer HOST:PORT` sends the search to one more address,
    for the fake TV in the tests.
 
+19. **Folders orOS watches (0.11.0).** orOS "Everything talks to everything",
+   item 25 (approved 2026-11-04): the bridge as the computer's sensor for orOS
+   Automations (`src/watch.cpp`). **Only the person at this computer adds a
+   folder**: `Add folder…` in the bridge's window, `--watch DIR`, or the
+   system's folder chooser that a paired page can ask to open (`watchPick`;
+   the answer comes when the person closes it). A page can never name a
+   folder to add, so a page cannot reach a file the person did not offer. A
+   page may take a folder off (`watchRemove`), which only removes access. At
+   most 16 folders, kept in config.json (`watch`: [{path, upto}]). One thread
+   looks at every folder every 2 s (`OROS_BRIDGE_WATCH_MS` in the tests):
+   plain files directly in the folder (no folders below, no links, at most
+   20000), without hidden files, `~$` lock files, `Thumbs.db`/`desktop.ini`
+   and names ending `.tmp`, `.part`, `.crdownload`, `.download` and the like.
+   Polling and not ReadDirectoryChangesW/inotify: one code path, network and
+   USB folders work, and a file must keep its size and time over two looks
+   before it counts, which is how "finished writing" is known anyway. What is
+   there when a folder is added is the baseline and is never reported; a new
+   name is reported once finished, and a reported name written again (a
+   scanner's `scan.pdf`) is reported again; a file of the baseline edited in
+   place is not. `upto` (the last look) is saved at most once a minute and on
+   every report, so a file written while the bridge was off is reported at its
+   next start; a copy that keeps an older time is not (honest limit). Each
+   report is a `fileNew` event to every paired page, and the last 100 stay in
+   `watched` for a page that was closed. A file's `key` is the first 16 hex of
+   the SHA-256 of folder, name, size and time, so the same file gives the same
+   key on every look (orOS runs a rule once per key). `fileRead` and `print`
+   take only a key from that list, and only while the file still has that size
+   and time, is a plain file and sits in a folder still watched (`changed`,
+   `notfound` otherwise); reads are at most 4 MB a block and 512 MB a file.
+   Printing: Windows `ShellExecuteEx` with the `print` verb (the file type's
+   own print command; `noapp` without one), Linux `lp -- <file>` without a
+   shell (`noapp` without CUPS). The chooser: Windows `IFileOpenDialog`
+   (`FOS_PICKFOLDERS`) on a thread of its own, owned by a hidden topmost window
+   so it comes up above the browser, also in `--bundled` copies; Linux the
+   window's GTK chooser through its `response` signal (never a nested loop,
+   decision 13), else zenity, kdialog or yad (`nodialog` without one). One
+   chooser at a time (`busy`). `--test-pick FILE` and `--test-print DIR` stand
+   in for the chooser and the printer in the tests. A USB device being plugged
+   in (also in item 25) waits for its own wave.
+
 ## Protocol (WebSocket, `ws://127.0.0.1:47621/`)
 
 Text messages are JSON. A command carries `op` and an optional `id`; the
@@ -308,8 +348,14 @@ answer repeats the `id` and has `ok` (and `error` when false). Events have
 | `castControl` | `renderer`, `action` (`play` \| `pause` \| `stop` \| `volume`), `volume`? (0..100) | |
 | `castStatus` | `renderer` | `state` (playing, paused, stopped, loading, idle, other), `volume`? |
 | `bluetoothSettings` | | `opened`: whether a settings app was started |
+| `watched` | | `folders`: [{path, ok (it is there now)}], `files`: the last 100 reported [{key, folder, name, kind (`pdf` \| `image` \| `other`), size, mtime, seen}] (0.11.0) |
+| `watchPick` | `lang`? (`en` \| `el`) | the system's folder chooser on this computer: `folder` and `folders`, or `cancelled`; `code` busy, nodialog |
+| `watchRemove` | `folder` | `removed`, `folders` |
+| `fileRead` | `key`, `offset`?, `length`? (1..4194304) | an `ORF1` block, then `size`, `offset`, `length`; `code` notfound, changed, toolarge, unreadable |
+| `print` | `key` | `printed`; `code` notfound, changed, noapp, failed |
 
-Events: `hello` {app, version, editors, scanner (0.9.0), cast (0.10.0)} on connect, `scanning`,
+Events: `hello` {app, version, editors, scanner (0.9.0), cast (0.10.0), watch (0.11.0)} on connect, `scanning`,
+`fileNew` {file} (a new file in a watched folder, as in `watched`),
 `editorClosed`, `renderError` {h, seq, error}, `levels` {peaks (one per
 input channel), running, pos, live? {h, on, peak, slow, failed}}, `audioError` {offset, error} for a bad
 `ORP1` block.
@@ -319,6 +365,12 @@ Sound to play and takes are binary too:
 ```
 "ORP1" | u32 offset | u32 frames | u16 channels | u16 0 | channels × frames × float32
 "ORT1" | u32 offset | u32 frames | u16 channels | u16 0 | channels × frames × float32
+```
+
+A watched file is read in blocks:
+
+```
+"ORF1" | u32 offset | u32 length | length bytes
 ```
 
 A scanned page comes in strips, top to bottom:
@@ -387,6 +439,16 @@ and stops; a TV that refuses a new address gets Stop and the address again;
 bad addresses (javascript:, file:, data:), unknown devices, bad actions and
 volumes never reach the TV. Real TVs, speakers and Windows' firewall need
 real hardware.
+The watch tests start the bridge with `--watch` on a folder that already
+holds a file (never reported), then check: a file written in pieces slower
+than a look is reported once, whole; temporary, hidden and lock files, a file
+in a folder below and a link are not; a photo's kind; reading back in 5-byte
+blocks; printing to the test printer; the same name written again gives a new
+key and the old key answers `changed`; a removed file `notfound`; the chooser
+cancelled and chosen; a folder taken off is quiet and its files unreadable;
+bad keys and ranges, and that a page cannot add a folder itself; and a second
+bridge on a saved config reports a file newer than the last look and not one
+older.
 `tests/update.test.js` runs a copy of the bridge against a local stand-in
 for GitHub: older, equal, newer and prerelease tags; an update that replaces
 the copy (Windows: the exe and the ASIO module, the old ones kept as `.old`;

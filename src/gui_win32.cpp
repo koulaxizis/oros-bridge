@@ -9,10 +9,12 @@
 #include <filesystem>
 #include <fstream>
 #include <thread>
+#include <vector>
 #include "mainloop.h"
 #include "scan.h"
 #include "scanner.h"
 #include "update.h"
+#include "watch.h"
 
 namespace ob {
 namespace {
@@ -25,7 +27,7 @@ constexpr wchar_t kClass[] = L"OrosBridgeMain";
 constexpr wchar_t kTitle[] = L"orOS Bridge";
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValue[] = L"orOS Bridge";
-enum { ID_SCAN = 101, ID_FORGET, ID_AUTOSTART, ID_HIDE, ID_OPEN, ID_QUIT, ID_UPDATE, ID_UPDATECHECK };
+enum { ID_SCAN = 101, ID_FORGET, ID_AUTOSTART, ID_HIDE, ID_OPEN, ID_QUIT, ID_UPDATE, ID_UPDATECHECK, ID_WATCHLIST, ID_WATCHADD, ID_WATCHREMOVE };
 
 struct Strings {
   const wchar_t *ready, *connected, *pairLabel, *hint, *plugins, *noPlugins, *scanning, *folders,
@@ -36,6 +38,8 @@ struct Strings {
   const wchar_t* scanners;
   // 0.9.1: the port is held by another bridge (often the one inside orOS)
   const wchar_t* elsewhere;
+  // 0.11.0: folders orOS watches
+  const wchar_t *watchLabel, *watchAdd, *watchRemove, *watchBad;
 };
 const Strings kEn = {
     L"Ready. Studio and Scan PDF can connect.",
@@ -68,6 +72,10 @@ const Strings kEn = {
     L"The program file could not be replaced.",
     L"Scanners found: %d (for orOS Scan PDF)",
     L"orOS Bridge is already running on this computer, for example inside the orOS you installed. orOS Studio and Scan PDF use that one, so there is nothing to do here.",
+    L"Folders orOS watches (new files for Automations):",
+    L"Add folder…",
+    L"Stop watching",
+    L"This folder cannot be watched:",
 };
 const Strings kEl = {
     L"Έτοιμο. Το Studio και το Scan PDF μπορούν να συνδεθούν.",
@@ -100,6 +108,10 @@ const Strings kEl = {
     L"Το αρχείο του προγράμματος δεν μπόρεσε να αντικατασταθεί.",
     L"Σαρωτές που βρέθηκαν: %d (για το orOS Scan PDF)",
     L"Το orOS Bridge τρέχει ήδη σε αυτόν τον υπολογιστή, για παράδειγμα μέσα στο orOS που εγκατέστησες. Το orOS Studio και το Scan PDF χρησιμοποιούν αυτό, οπότε δεν χρειάζεται να κάνεις τίποτα εδώ.",
+    L"Φάκελοι που παρακολουθεί το orOS (νέα αρχεία για τους Αυτοματισμούς):",
+    L"Προσθήκη φακέλου…",
+    L"Διακοπή παρακολούθησης",
+    L"Αυτός ο φάκελος δεν μπορεί να παρακολουθηθεί:",
 };
 
 const Strings& strings() {
@@ -121,6 +133,9 @@ struct Gui {
   HWND hwnd = nullptr;
   HWND status = nullptr, pairLabel = nullptr, code = nullptr, plugins = nullptr, folders = nullptr, scanners = nullptr;
   HWND scan = nullptr, autostart = nullptr;
+  HWND watchList = nullptr;          // 0.11.0
+  int shownWatch = 0;
+  std::vector<std::string> watchShown;
   HWND updText = nullptr, updButton = nullptr;
   std::wstring shownUpdate = L"-";
   bool updRow = false;
@@ -264,7 +279,7 @@ void refreshPlugins() {
 }
 
 // a newer release: a line and a button at the bottom (the window grows by it); nothing pops up
-constexpr int kBaseH = 372, kUpdH = 36;
+constexpr int kBaseH = 490, kUpdH = 36;
 void fitWindow(bool withUpdate) {
   RECT r{0, 0, px(460), px(kBaseH + (withUpdate ? kUpdH : 0))};
   AdjustWindowRectEx(&r, DWORD(GetWindowLongPtrW(g.hwnd, GWL_STYLE)), FALSE, 0);
@@ -309,6 +324,36 @@ void runUpdate() {
   }
   update::installAsync([] { quit(); });   // the new bridge has started: this one ends
   refreshUpdate();
+}
+
+// ---------- watched folders (0.11.0) ----------
+void refreshWatch() {
+  int v = watch::version();
+  if (v == g.shownWatch) return;
+  g.shownWatch = v;
+  g.watchShown = watch::folders();
+  SendMessageW(g.watchList, LB_RESETCONTENT, 0, 0);
+  for (auto& f : g.watchShown) SendMessageW(g.watchList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(wide(f).c_str()));
+}
+void addWatch() {
+  bool el = g.s == &kEl;
+  watch::pickAsync(el ? "el" : "en", [](int st, std::string path) {   // the chooser runs on a thread of its own
+    if (st != 1) return;
+    MainLoop::get().post([path] {
+      std::string err;
+      if (!watch::add(path, err)) {
+        std::wstring t = std::wstring(g.s->watchBad) + L"\n" + wide(path) + L"\n\n" + wide(err);
+        MessageBoxW(g.hwnd, t.c_str(), kTitle, MB_OK | MB_ICONWARNING);
+      }
+      refreshWatch();
+    });
+  });
+}
+void removeWatch() {
+  LRESULT i = SendMessageW(g.watchList, LB_GETCURSEL, 0, 0);
+  if (i == LB_ERR || size_t(i) >= g.watchShown.size()) return;
+  watch::remove(g.watchShown[size_t(i)]);
+  refreshWatch();
 }
 
 void startScan() {
@@ -364,6 +409,7 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
       refreshStatus();
       refreshPlugins();
       refreshUpdate();
+      refreshWatch();
       return 0;
     case WM_COMMAND:
       switch (LOWORD(wp)) {
@@ -376,6 +422,8 @@ LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
           break;
         case ID_HIDE: hideToTray(); break;
         case ID_UPDATE: runUpdate(); break;
+        case ID_WATCHADD: addWatch(); break;
+        case ID_WATCHREMOVE: removeWatch(); break;
       }
       return 0;
     case WM_SIZE:
@@ -456,10 +504,15 @@ void createWindow() {
   g.scanners = add(L"STATIC", L"", SS_NOPREFIX, M, 156, inner, 20, 0, g.font);   // 0.9.0
   add(L"STATIC", s.folders, SS_NOPREFIX, M, 180, inner, 20, 0, g.font);
   g.folders = add(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL, M, 202, inner, 72, 0, g.font, WS_EX_CLIENTEDGE);
-  g.scan = add(L"BUTTON", s.scan, BS_PUSHBUTTON | WS_TABSTOP, M, 286, 180, 30, ID_SCAN, g.font);
-  add(L"BUTTON", s.forget, BS_PUSHBUTTON | WS_TABSTOP, M + 188, 286, 220, 30, ID_FORGET, g.font);
-  g.autostart = add(L"BUTTON", s.autostart, BS_AUTOCHECKBOX | WS_TABSTOP, M, 330, 280, 24, ID_AUTOSTART, g.font);
-  add(L"BUTTON", s.hide, BS_DEFPUSHBUTTON | WS_TABSTOP, M + inner - 110, 327, 110, 30, ID_HIDE, g.font);
+  // 0.11.0: the folders orOS hears about; only the person here adds one
+  add(L"STATIC", s.watchLabel, SS_NOPREFIX, M, 284, inner, 20, 0, g.font);
+  g.watchList = add(L"LISTBOX", L"", LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_TABSTOP, M, 306, inner, 56, ID_WATCHLIST, g.font, WS_EX_CLIENTEDGE);
+  add(L"BUTTON", s.watchAdd, BS_PUSHBUTTON | WS_TABSTOP, M, 368, 180, 30, ID_WATCHADD, g.font);
+  add(L"BUTTON", s.watchRemove, BS_PUSHBUTTON | WS_TABSTOP, M + 188, 368, 220, 30, ID_WATCHREMOVE, g.font);
+  g.scan = add(L"BUTTON", s.scan, BS_PUSHBUTTON | WS_TABSTOP, M, 404, 180, 30, ID_SCAN, g.font);
+  add(L"BUTTON", s.forget, BS_PUSHBUTTON | WS_TABSTOP, M + 188, 404, 220, 30, ID_FORGET, g.font);
+  g.autostart = add(L"BUTTON", s.autostart, BS_AUTOCHECKBOX | WS_TABSTOP, M, 448, 280, 24, ID_AUTOSTART, g.font);
+  add(L"BUTTON", s.hide, BS_DEFPUSHBUTTON | WS_TABSTOP, M + inner - 110, 445, 110, 30, ID_HIDE, g.font);
   g.updText = add(L"STATIC", L"", SS_NOPREFIX | SS_CENTERIMAGE, M, kBaseH - 4, inner - 170, 30, 0, g.bold);
   g.updButton = add(L"BUTTON", s.updButton, BS_PUSHBUTTON | WS_TABSTOP, M + inner - 160, kBaseH - 4, 160, 30, ID_UPDATE, g.font);
   ShowWindow(g.updText, SW_HIDE);

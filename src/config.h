@@ -44,6 +44,9 @@ public:
   // "Tell me about new versions" (0.8.0), on unless the person turned it off
   bool updateCheck();
   void setUpdateCheck(bool on);                  // path -> modification time when scanned
+  // watched folders (0.11.0): [{path, upto}], upto = the last look in ms
+  nlohmann::json watchList();
+  void setWatchList(const nlohmann::json& list);
   const PluginInfo* find(const std::string& id, PluginInfo& out);
 
   static std::string defaultDir();

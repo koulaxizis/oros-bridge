@@ -142,6 +142,23 @@ searched by the bridge (orOS uses the browser's own Cast menu for it). The
 bridge can also open the system's Bluetooth settings, where a Bluetooth
 speaker is paired.
 
+### Folders orOS watches (0.11.0)
+
+The bridge can tell orOS about new files in folders you choose, for orOS
+Automations: a new PDF in your scanner's or downloads folder can go to Scan
+PDF or Invoices, a new photo to Files, and a file can be printed. Add a folder
+with `Add folder…` in the bridge's window, or from orOS (the system's folder
+chooser opens on this computer; orOS cannot name a folder itself);
+`Stop watching` takes it off, and `oros-bridge --watch DIR` adds one from a
+terminal. The bridge looks every 2 seconds, only in the folder itself (not
+the folders inside it), and reports a file once its size stops changing;
+files that were there when you added the folder, hidden files and downloads in
+progress are left out. Files added while the bridge was not running are
+reported at its next start. Printing uses the file type's own print command on
+Windows and CUPS (`lp`) on Linux. On Linux without the bridge's window (orOS
+Portable, orOS USB) the chooser is zenity, kdialog or yad, if one is
+installed.
+
 ## Safety
 
 - It listens on `127.0.0.1` only, so other computers cannot reach it.
@@ -155,6 +172,11 @@ speaker is paired.
 - TVs on the network: the bridge looks for them only when a paired page
   asks, talks only to devices that answered at a home network address, sends
   only http(s) stream addresses, and serves nothing to the network.
+- Watched folders: only you add a folder, here on this computer. A paired
+  page hears about new files in those folders and can read or print only a
+  file the bridge told it about, while it is still the same file directly in
+  a watched folder; links and the folders below are not followed, and
+  nothing else on the disk is reachable.
 
 ## Build
 
