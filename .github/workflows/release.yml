@@ -85,25 +85,43 @@ jobs:
   # on the oldest supported Ubuntu so it runs on older systems too; since
   # 0.7.0 a window and tray icon, plugin windows on X11, and .deb, .rpm and
   # AppImage beside the tar.gz (packaging/linux); added to the same draft release.
+  # The runner is 24.04 (22.04 images end in April 2027); the binary is built
+  # and tested inside an ubuntu:22.04 container, so it needs glibc 2.35 at
+  # most (Ubuntu 22.04, Debian 12), which the step after it checks. Packaging
+  # only wraps that binary and runs on the runner itself.
   linux:
     needs: windows
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
-      - name: CMake 3.28+
-        run: pip install --user "cmake>=3.28,<4" && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: X11 headers and Xvfb
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libx11-dev xvfb desktop-file-utils
-      - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-      - name: Build
-        run: cmake --build build --parallel
-      - name: Test
-        run: ctest --test-dir build --output-on-failure && xvfb-run -a ctest --test-dir build --output-on-failure
+      - name: Build and test in Ubuntu 22.04
+        run: |
+          # Node's official build needs glibc 2.28, so the runner's Node serves the tests inside too.
+          node_dir="$(dirname "$(dirname "$(command -v node)")")"
+          docker run --rm -v "$PWD:/src" -v "$node_dir:/opt/node:ro" -w /src \
+            -e DEBIAN_FRONTEND=noninteractive -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            ubuntu:22.04 bash -euo pipefail -c '
+              apt-get update -q
+              apt-get install -y -q --no-install-recommends build-essential git ca-certificates python3-pip libx11-dev xvfb xauth
+              pip3 install -q "cmake>=3.28,<4"
+              git config --global --add safe.directory '*'
+              export PATH="/opt/node/bin:$PATH"
+              cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+              cmake --build build --parallel
+              ctest --test-dir build --output-on-failure
+              xvfb-run -a ctest --test-dir build --output-on-failure
+              chown -R "$HOST_UID:$HOST_GID" build'
+      - name: Runs on glibc 2.35 (Ubuntu 22.04, Debian 12)
+        run: |
+          need="$(objdump -T build/oros-bridge | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
+          echo "oros-bridge needs $need"
+          printf '%s\n' "$need" GLIBC_2.35 | sort -CV
+      - name: Packaging tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends desktop-file-utils
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: "1.26.11"
