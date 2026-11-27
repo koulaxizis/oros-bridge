@@ -851,7 +851,9 @@ test("scanner: cancel stops the scan, one scan at a time, bad requests are refus
   assert.equal(s.pages.length, 0, "the page that was cut short is not given");
   // a second page cannot scan while one scans
   const other = await paired();
-  const first = await c.cmd({ op: "scanStart", scanner: "test:loop", source: "adf", mode: "color", dpi: 300 });
+  // 600 dpi colour from the feeder, as above: long enough that the second
+  // page asks while it still runs (at 300 dpi a fast runner finished first)
+  const first = await c.cmd({ op: "scanStart", scanner: "test:loop", source: "adf", mode: "color", dpi: 600 });
   assert.equal(first.ok, true);
   const second = await scanPages(other, { scanner: "test:loop", source: "flatbed", mode: "gray", dpi: 75 });
   assert.equal(second.end.event, "scanError");
