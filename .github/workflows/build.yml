@@ -15,8 +15,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
       - name: X11 headers and Xvfb (Linux)
@@ -43,12 +43,12 @@ jobs:
           Copy-Item build/Release/oros-bridge.exe, build/Release/oros-bridge-asio.dll dist/
           Copy-Item asio/LICENSE dist/LICENSE-asio.txt
           Copy-Item README.md, LICENSE, THIRD_PARTY.md dist/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: runner.os == 'Windows'
         with:
           name: oros-bridge-windows-x64
           path: dist/
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         if: runner.os == 'Linux'
         with:
           go-version: "1.26.11"
@@ -60,7 +60,7 @@ jobs:
           oros-bridge --help | head -1
           test -f /usr/share/applications/oros-bridge.desktop
           APPIMAGE_EXTRACT_AND_RUN=1 ./dist/oros-bridge-linux-x64.AppImage --help | head -1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: runner.os == 'Linux'
         with:
           name: oros-bridge-linux-x64
